@@ -5,3 +5,4 @@ models/
 *.mp4
 *.wav
 .vscode/
+.idea/
