@@ -1,4 +1,5 @@
 venv/
+.venv/
 __pycache__/
 *.py[cod]
 models/
@@ -6,3 +7,14 @@ models/
 *.wav
 .vscode/
 .idea/
+
+# Results and uploads
+results/
+uploads/
+
+# FFmpeg binary (large files)
+ffmpeg/
+
+# Test files
+test_*.py
+install_ffmpeg.py
