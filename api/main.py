@@ -9,6 +9,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.rabbitmq_client import RabbitMQClient
+from shared.elasticsearch_client import ElasticsearchClient
 from shared.schemas import VideoProcessingTask, VideoProcessingResponse
 
 app = FastAPI(title="EchoStream API")
@@ -20,8 +21,9 @@ RABBITMQ_QUEUE = "video_processing_queue"
 # Ensure upload directory exists
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Initialize RabbitMQ client (will connect on first upload)
+# Initialize RabbitMQ and Elasticsearch clients (will connect on first upload)
 rabbitmq_client = None
+es_client = None
 
 
 def get_rabbitmq_client():
@@ -32,6 +34,15 @@ def get_rabbitmq_client():
         rabbitmq_client.connect()
         rabbitmq_client.declare_queue(RABBITMQ_QUEUE)
     return rabbitmq_client
+
+
+def get_es_client():
+    """Lazy initialization of Elasticsearch client"""
+    global es_client
+    if es_client is None:
+        es_client = ElasticsearchClient()
+        es_client.connect()
+    return es_client
 
 
 @app.get("/")
@@ -91,6 +102,10 @@ async def upload_video(file: UploadFile = File(...)):
         client = get_rabbitmq_client()
         client.publish_message(RABBITMQ_QUEUE, task.model_dump())
 
+        # Save to Elasticsearch
+        es = get_es_client()
+        es.create_task(task.model_dump())
+
         return VideoProcessingResponse(
             task_id=task_id,
             filename=file.filename,
@@ -107,10 +122,12 @@ async def upload_video(file: UploadFile = File(...)):
 
 @app.on_event("shutdown")
 def shutdown_event():
-    """Close RabbitMQ connection on shutdown"""
-    global rabbitmq_client
+    """Close connections on shutdown"""
+    global rabbitmq_client, es_client
     if rabbitmq_client:
         rabbitmq_client.close()
+    if es_client:
+        es_client.close()
 
 
 if __name__ == "__main__":
