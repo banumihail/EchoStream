@@ -7,6 +7,11 @@ import torch
 import json
 from transformers import pipeline
 from base_worker import BaseWorker
+import sys
+
+# Add parent directory to import shared modules
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared.elasticsearch_client import ElasticsearchClient
 
 
 class NERWorker(BaseWorker):
@@ -19,6 +24,9 @@ class NERWorker(BaseWorker):
             queue_name="transcript_analysis_queue",
             worker_name="NER Worker"
         )
+
+        # Initialize Elasticsearch client
+        self.es_client = None
 
         # Check for GPU
         self.device = 0 if torch.cuda.is_available() else -1
@@ -38,6 +46,13 @@ class NERWorker(BaseWorker):
         self.sensitive_entities = ["PER", "LOC", "ORG"]  # Person, Location, Organization
 
         print(f"[{self.worker_name}] Model loaded successfully!\n")
+
+    def get_es_client(self):
+        """Lazy initialization of ES client"""
+        if self.es_client is None:
+            self.es_client = ElasticsearchClient()
+            self.es_client.connect()
+        return self.es_client
 
     def analyze_text(self, text: str) -> dict:
         """
@@ -82,27 +97,19 @@ class NERWorker(BaseWorker):
 
     def save_results(self, task_id: str, analysis: dict):
         """
-        Save NER analysis results to file
-
-        Args:
-            task_id: Task ID
-            analysis: Analysis results
+        Save NER analysis results to Elasticsearch
         """
-        print(f"  [2/2] Saving analysis results...")
-
-        # Convert to absolute path (worker may run from different directory)
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        results_dir = os.path.join(project_root, "results")
-        os.makedirs(results_dir, exist_ok=True)
-
-        result_file = os.path.join(results_dir, f"{task_id}_ner_analysis.json")
-        with open(result_file, "w", encoding="utf-8") as f:
-            json.dump({
-                "task_id": task_id,
-                "analysis": analysis
-            }, f, indent=2, ensure_ascii=False)
-
-        print(f"  Results saved to: {result_file}")
+        print(f"  [2/2] Saving analysis results to Elasticsearch...")
+        es = self.get_es_client()
+        es.update_task_status(
+            task_id=task_id,
+            status="completed",
+            extra_fields={
+                "ner_analysis": analysis,
+                "has_pii": analysis["contains_pii"]
+            }
+        )
+        print(f"  Results saved to database.")
 
     def process_task(self, task_data: dict):
         """

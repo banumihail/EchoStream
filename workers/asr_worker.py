@@ -2,7 +2,8 @@
 ASR (Automatic Speech Recognition) Worker
 Uses OpenAI's Whisper model to transcribe audio from videos
 """
-# Set FFmpeg path before importing moviepy
+# Set model cache and FFmpeg paths before importing libraries
+import set_model_cache
 import set_ffmpeg_path
 
 import os
@@ -16,6 +17,7 @@ from base_worker import BaseWorker
 # Add parent directory to import shared modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.rabbitmq_client import RabbitMQClient
+from shared.elasticsearch_client import ElasticsearchClient
 
 
 class ASRWorker(BaseWorker):
@@ -31,6 +33,9 @@ class ASRWorker(BaseWorker):
 
         # Initialize RabbitMQ client for publishing to NER queue
         self.publisher = None
+        
+        # Initialize Elasticsearch client
+        self.es_client = None
 
         # Check for GPU
         self.device = 0 if torch.cuda.is_available() else -1
@@ -56,6 +61,13 @@ class ASRWorker(BaseWorker):
             self.publisher.connect()
             self.publisher.declare_queue("transcript_analysis_queue")
         return self.publisher
+
+    def get_es_client(self):
+        """Lazy initialization of ES client"""
+        if self.es_client is None:
+            self.es_client = ElasticsearchClient()
+            self.es_client.connect()
+        return self.es_client
 
     def extract_audio(self, video_path: str, audio_path: str):
         """
@@ -88,25 +100,22 @@ class ASRWorker(BaseWorker):
 
     def save_results(self, task_id: str, transcription: dict):
         """
-        Save transcription results to file
-        Later this will save to database
-
-        Args:
-            task_id: Task ID
-            transcription: Transcription result
+        Save transcription results to Elasticsearch
         """
-        print(f"  [3/3] Saving results...")
-        results_dir = "results"
-        os.makedirs(results_dir, exist_ok=True)
-
-        result_file = os.path.join(results_dir, f"{task_id}_transcript.json")
-        with open(result_file, "w", encoding="utf-8") as f:
-            json.dump({
-                "task_id": task_id,
-                "transcription": transcription
-            }, f, indent=2, ensure_ascii=False)
-
-        print(f"  Results saved to: {result_file}")
+        print(f"  [3/3] Saving results to Elasticsearch...")
+        es = self.get_es_client()
+        
+        # We only save the text to not bloat the database if it's very large,
+        # but could store 'transcription' fully in 'transcription_metadata'.
+        es.update_task_status(
+            task_id=task_id,
+            status="analyzing",
+            extra_fields={
+                "transcript": transcription["text"],
+                "transcription_metadata": transcription
+            }
+        )
+        print(f"  Results saved to database.")
 
     def process_task(self, task_data: dict):
         """

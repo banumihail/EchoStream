@@ -15,6 +15,12 @@ uploads/
 # FFmpeg binary (large files)
 ffmpeg/
 
+# Model cache (HuggingFace models - on D: instead of C:)
+models_cache/
+
+# Pip cache (redirected to D:)
+.pip_cache/
+
 # Test files
 test_*.py
 install_ffmpeg.py
