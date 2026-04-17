@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import uvicorn
 import uuid
@@ -14,9 +15,20 @@ from shared.schemas import VideoProcessingTask, VideoProcessingResponse
 
 app = FastAPI(title="EchoStream API")
 
+# Setup CORS for Frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins, adjust in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Configuration
 UPLOAD_DIR = "uploads"
 RABBITMQ_QUEUE = "video_processing_queue"
+AUDIO_EVENT_QUEUE = "audio_event_queue"
+VISION_QUEUE = "vision_queue"
 
 # Ensure upload directory exists
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -27,13 +39,14 @@ es_client = None
 
 
 def get_rabbitmq_client():
-    """Lazy initialization of RabbitMQ client"""
-    global rabbitmq_client
-    if rabbitmq_client is None:
-        rabbitmq_client = RabbitMQClient()
-        rabbitmq_client.connect()
-        rabbitmq_client.declare_queue(RABBITMQ_QUEUE)
-    return rabbitmq_client
+    """Initialize a fresh RabbitMQ client to avoid heartbeat timeouts"""
+    client = RabbitMQClient()
+    client.connect()
+    # Declare all queues to ensure they exist before publishing
+    client.declare_queue(RABBITMQ_QUEUE)
+    client.declare_queue(AUDIO_EVENT_QUEUE)
+    client.declare_queue(VISION_QUEUE)
+    return client
 
 
 def get_es_client():
@@ -52,9 +65,20 @@ def read_root():
         "version": "1.0",
         "endpoints": {
             "upload": "/upload-video",
+            "task": "/tasks/{task_id}",
             "docs": "/docs"
         }
     }
+
+
+@app.get("/tasks/{task_id}")
+def get_task(task_id: str):
+    """Get the current progress and results of a task"""
+    es = get_es_client()
+    task = es.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
 
 
 @app.post("/upload-video", response_model=VideoProcessingResponse)
@@ -98,9 +122,12 @@ async def upload_video(file: UploadFile = File(...)):
             status="pending"
         )
 
-        # Publish to RabbitMQ
+        # Publish to RabbitMQ queues for the different workers
         client = get_rabbitmq_client()
         client.publish_message(RABBITMQ_QUEUE, task.model_dump())
+        client.publish_message(AUDIO_EVENT_QUEUE, task.model_dump())
+        client.publish_message(VISION_QUEUE, task.model_dump())
+        client.close()
 
         # Save to Elasticsearch
         es = get_es_client()
