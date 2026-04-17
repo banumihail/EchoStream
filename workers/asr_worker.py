@@ -138,7 +138,7 @@ class ASRWorker(BaseWorker):
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
         # Create temporary audio file path
-        audio_path = video_path.replace(".mp4", ".wav")
+        audio_path = video_path.replace(".mp4", f"_{task_id}_asr.wav")
 
         try:
             # Step 1: Extract audio

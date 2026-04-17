@@ -37,6 +37,8 @@ class ElasticsearchClient:
                         "transcript": {"type": "text"},
                         "transcription_metadata": {"type": "object"},
                         "ner_analysis": {"type": "object"},
+                        "audio_event_analysis": {"type": "object"},
+                        "vision_analysis": {"type": "object"},
                         "has_pii": {"type": "boolean"},
                         "updated_at": {"type": "date"}
                     }
@@ -54,6 +56,14 @@ class ElasticsearchClient:
             document=task_data
         )
         return response
+
+    def get_task(self, task_id: str):
+        """Fetch a specific task's data by its ID"""
+        try:
+            res = self.client.get(index=self.index_name, id=task_id)
+            return res.get("_source")
+        except Exception:
+            return None
 
     def update_task_status(self, task_id: str, status: str, extra_fields: dict = None):
         """Update task status and any extra fields"""
