@@ -28,7 +28,8 @@ class ASRWorker(BaseWorker):
     def __init__(self):
         super().__init__(
             queue_name="video_processing_queue",
-            worker_name="ASR Worker"
+            worker_name="ASR Worker",
+            worker_key="asr"
         )
 
         # Initialize RabbitMQ client for publishing to NER queue
@@ -43,24 +44,23 @@ class ASRWorker(BaseWorker):
 
         print(f"[{self.worker_name}] Initializing Whisper model on {gpu_info}...")
 
-        # Initialize Whisper pipeline
-        # Using 'base' model for balance between speed and accuracy
-        # Options: tiny, base, small, medium, large
+        # Using Whisper's native long-form mode (return_timestamps=True at call time).
+        # Do NOT set chunk_length_s here — that triggers an experimental pipeline path
+        # that rejects Whisper-specific generate_kwargs like condition_on_previous_text.
         self.transcriber = pipeline(
             "automatic-speech-recognition",
             model="openai/whisper-base",
-            device=self.device
+            device=self.device,
         )
 
         print(f"[{self.worker_name}] Model loaded successfully!\n")
 
     def get_publisher(self):
-        """Lazy initialization of publisher"""
-        if self.publisher is None:
-            self.publisher = RabbitMQClient()
-            self.publisher.connect()
-            self.publisher.declare_queue("transcript_analysis_queue")
-        return self.publisher
+        """Create a fresh publisher connection to avoid heartbeat timeouts during long transcriptions"""
+        publisher = RabbitMQClient()
+        publisher.connect()
+        publisher.declare_queue("transcript_analysis_queue")
+        return publisher
 
     def get_es_client(self):
         """Lazy initialization of ES client"""
@@ -94,7 +94,12 @@ class ASRWorker(BaseWorker):
             Dictionary with transcription result
         """
         print(f"  [2/3] Transcribing audio with Whisper...")
-        result = self.transcriber(audio_path)
+        # return_timestamps is essential for Active Censorship to get accurate chunk timecodes
+        result = self.transcriber(
+            audio_path,
+            return_timestamps=True,
+            generate_kwargs={"language": "en", "condition_on_prev_tokens": False, "temperature": 0}
+        )
         print(f"  Transcription complete!")
         return result
 
@@ -105,11 +110,11 @@ class ASRWorker(BaseWorker):
         print(f"  [3/3] Saving results to Elasticsearch...")
         es = self.get_es_client()
         
-        # We only save the text to not bloat the database if it's very large,
-        # but could store 'transcription' fully in 'transcription_metadata'.
-        es.update_task_status(
+        # Use per-worker status update to avoid race conditions
+        es.update_worker_status(
             task_id=task_id,
-            status="analyzing",
+            worker_name="asr",
+            worker_status="done",
             extra_fields={
                 "transcript": transcription["text"],
                 "transcription_metadata": transcription
@@ -127,6 +132,10 @@ class ASRWorker(BaseWorker):
         task_id = task_data["task_id"]
         video_path = task_data["file_path"]
 
+        # Mark as processing
+        es = self.get_es_client()
+        es.update_worker_status(task_id, "asr", "processing")
+
         # Convert to absolute path (worker may run from different directory)
         if not os.path.isabs(video_path):
             # Get project root (parent of workers directory)
@@ -143,7 +152,6 @@ class ASRWorker(BaseWorker):
         try:
             # Step 1: Extract audio
             self.extract_audio(video_path, audio_path)
-
             # Step 2: Transcribe
             transcription = self.transcribe_audio(audio_path)
 
@@ -160,6 +168,7 @@ class ASRWorker(BaseWorker):
                 "transcript": transcription['text']
             }
             publisher.publish_message("transcript_analysis_queue", ner_task)
+            publisher.close()
             print(f"  Published to NER queue")
 
         finally:

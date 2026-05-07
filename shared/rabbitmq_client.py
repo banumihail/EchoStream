@@ -1,5 +1,6 @@
 import pika
 import json
+import os
 from typing import Dict, Any
 
 
@@ -11,15 +12,15 @@ class RabbitMQClient:
 
     def __init__(
         self,
-        host: str = "localhost",
-        port: int = 5672,
-        username: str = "guest",
-        password: str = "guest"
+        host: str = None,
+        port: int = None,
+        username: str = None,
+        password: str = None
     ):
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
+        self.host = host or os.getenv("RABBITMQ_HOST", "localhost")
+        self.port = port or int(os.getenv("RABBITMQ_PORT", "5672"))
+        self.username = username or os.getenv("RABBITMQ_USER", "guest")
+        self.password = password or os.getenv("RABBITMQ_PASS", "guest")
         self.connection = None
         self.channel = None
 
@@ -29,7 +30,9 @@ class RabbitMQClient:
         parameters = pika.ConnectionParameters(
             host=self.host,
             port=self.port,
-            credentials=credentials
+            credentials=credentials,
+            heartbeat=600,          # 10 min — prevents timeout during heavy ML inference
+            blocked_connection_timeout=300
         )
         self.connection = pika.BlockingConnection(parameters)
         self.channel = self.connection.channel()

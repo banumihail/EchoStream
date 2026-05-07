@@ -26,7 +26,8 @@ class AudioEventWorker(BaseWorker):
     def __init__(self):
         super().__init__(
             queue_name="audio_event_queue",
-            worker_name="Audio Event Worker"
+            worker_name="Audio Event Worker",
+            worker_key="audio_event"
         )
         
         self.es_client = None
@@ -70,6 +71,10 @@ class AudioEventWorker(BaseWorker):
         task_id = task_data["task_id"]
         video_path = task_data["file_path"]
 
+        # Mark as processing
+        es = self.get_es_client()
+        es.update_worker_status(task_id, "audio_event", "processing")
+
         if not os.path.isabs(video_path):
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             video_path = os.path.join(project_root, video_path)
@@ -85,10 +90,10 @@ class AudioEventWorker(BaseWorker):
             analysis = self.analyze_audio(audio_path)
 
             print(f"  [3/3] Saving event analysis to DB...")
-            es = self.get_es_client()
-            es.update_task_status(
+            es.update_worker_status(
                 task_id=task_id,
-                status="analyzing",
+                worker_name="audio_event",
+                worker_status="done",
                 extra_fields={"audio_event_analysis": analysis}
             )
             print(f"  [OK] Audio event analysis saved.")

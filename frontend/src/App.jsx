@@ -1,25 +1,50 @@
 import React, { useState } from 'react';
 import './index.css';
+import Navbar from './components/Navbar';
 import UploadDashboard from './components/UploadDashboard';
 import AnalysisDashboard from './components/AnalysisDashboard';
+import TaskHistory from './components/TaskHistory';
 
 function App() {
+  const [currentView, setCurrentView] = useState('upload'); // 'upload' | 'analysis' | 'history'
   const [taskId, setTaskId] = useState(null);
 
-  return (
-    <div className="app-container">
-      <header className="header">
-        <h1><span className="gradient-text">EchoStream</span> AI</h1>
-        <p>Advanced Video Content Moderation & Analysis</p>
-      </header>
+  const handleUploadSuccess = (id) => {
+    setTaskId(id);
+    setCurrentView('analysis');
+  };
 
-      <main>
-        {!taskId ? (
-          <UploadDashboard onUploadSuccess={(id) => setTaskId(id)} />
-        ) : (
-          <AnalysisDashboard taskId={taskId} onReset={() => setTaskId(null)} />
+  const handleSelectTask = (id) => {
+    setTaskId(id);
+    setCurrentView('analysis');
+  };
+
+  const handleReset = () => {
+    setTaskId(null);
+    setCurrentView('upload');
+  };
+
+  const handleNavigate = (view) => {
+    if (view === 'upload') {
+      setTaskId(null);
+    }
+    setCurrentView(view);
+  };
+
+  return (
+    <div className="app-shell">
+      <Navbar currentView={currentView} onNavigate={handleNavigate} />
+      <div className="page-content">
+        {currentView === 'upload' && (
+          <UploadDashboard onUploadSuccess={handleUploadSuccess} />
         )}
-      </main>
+        {currentView === 'analysis' && taskId && (
+          <AnalysisDashboard taskId={taskId} onReset={handleReset} />
+        )}
+        {currentView === 'history' && (
+          <TaskHistory onSelectTask={handleSelectTask} />
+        )}
+      </div>
     </div>
   );
 }

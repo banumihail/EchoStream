@@ -19,9 +19,10 @@ class BaseWorker:
     Handles RabbitMQ connection and provides process_task method to override
     """
 
-    def __init__(self, queue_name: str, worker_name: str = "Worker"):
+    def __init__(self, queue_name: str, worker_name: str = "Worker", worker_key: str = None):
         self.queue_name = queue_name
         self.worker_name = worker_name
+        self.worker_key = worker_key  # ES field prefix, e.g. "asr", "ner"
         self.client = RabbitMQClient()
 
     def process_task(self, task_data: dict):
@@ -60,8 +61,19 @@ class BaseWorker:
 
         except Exception as e:
             print(f"[{self.worker_name}] Error processing task: {e}")
-            # Negative acknowledgment - message will be requeued
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            import traceback
+            traceback.print_exc()
+            # Try to mark the worker as errored in ES so the UI doesn't stay stuck
+            try:
+                task_data_err = json.loads(body) if isinstance(body, (bytes, str)) else {}
+                task_id_err = task_data_err.get("task_id")
+                if task_id_err and self.worker_key and hasattr(self, 'get_es_client'):
+                    es = self.get_es_client()
+                    es.update_worker_status(task_id_err, self.worker_key, "error")
+            except Exception:
+                pass
+            # Negative acknowledgment - do not requeue to prevent infinite loops
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
     def start(self):
         """Start consuming messages from the queue"""

@@ -22,7 +22,8 @@ class NERWorker(BaseWorker):
     def __init__(self):
         super().__init__(
             queue_name="transcript_analysis_queue",
-            worker_name="NER Worker"
+            worker_name="NER Worker",
+            worker_key="ner"
         )
 
         # Initialize Elasticsearch client
@@ -101,9 +102,12 @@ class NERWorker(BaseWorker):
         """
         print(f"  [2/2] Saving analysis results to Elasticsearch...")
         es = self.get_es_client()
-        es.update_task_status(
+        
+        # Use per-worker status update to avoid race conditions
+        es.update_worker_status(
             task_id=task_id,
-            status="completed",
+            worker_name="ner",
+            worker_status="done",
             extra_fields={
                 "ner_analysis": analysis,
                 "has_pii": analysis["contains_pii"]
@@ -119,6 +123,10 @@ class NERWorker(BaseWorker):
             task_data: Task information from RabbitMQ
         """
         task_id = task_data["task_id"]
+
+        # Mark as processing
+        es = self.get_es_client()
+        es.update_worker_status(task_id, "ner", "processing")
 
         # Get transcript directly from message (sent by ASR worker)
         text = task_data.get("transcript", "")
