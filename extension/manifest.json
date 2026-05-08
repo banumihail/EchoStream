@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "EchoStream — Send to Pipeline",
+  "version": "0.1.0",
+  "description": "Right-click any video link or page to send it to your local EchoStream backend for AI moderation and active censorship.",
+  "permissions": [
+    "contextMenus",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "EchoStream"
+  }
+}

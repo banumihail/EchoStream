@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import WorkerProgress from './WorkerProgress';
+import InteractiveTranscript from './InteractiveTranscript';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -12,6 +13,14 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
   const [showConfig, setShowConfig] = useState(false);
   const [censorAudio, setCensorAudio] = useState(true);
   const [blurObjects, setBlurObjects] = useState(['person']);
+  const [videoMode, setVideoMode] = useState('blur');     // box | blur | pixelate
+  const [audioMode, setAudioMode] = useState('beep');     // silence | beep | muffle
+  const [faceMode, setFaceMode] = useState('selected');   // selected | others
+  // Each entry: { id, file, name, preview }
+  const [references, setReferences] = useState([]);
+
+  // Ref to the original video element so the interactive transcript can seek it
+  const originalVideoRef = useRef(null);
 
   useEffect(() => {
     let active = true;
@@ -48,15 +57,47 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
     setIsCensoring(true);
     setShowConfig(false);
     try {
-      await fetch(`${API_URL}/tasks/${taskId}/censor`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ censor_audio: censorAudio, blur_objects: blurObjects })
-      });
+      const fd = new FormData();
+      fd.append('censor_audio', String(censorAudio));
+      fd.append('blur_objects', blurObjects.join(','));
+      fd.append('video_mode', videoMode);
+      fd.append('audio_mode', audioMode);
+      fd.append('face_mode', faceMode);
+      // Names array kept in lockstep with files
+      fd.append('reference_names', references.map(r => r.name || '').join(','));
+      for (const ref of references) fd.append('reference_faces', ref.file);
+      await fetch(`${API_URL}/tasks/${taskId}/censor`, { method: 'POST', body: fd });
     } catch (err) {
       console.error(err);
       setIsCensoring(false);
     }
+  };
+
+  const addReference = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        setReferences((prev) => [...prev, {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          file,
+          name: '',
+          preview: ev.target.result,
+        }]);
+      };
+      reader.readAsDataURL(file);
+    });
+    // reset input so the same file can be re-added later
+    e.target.value = '';
+  };
+
+  const removeReference = (id) => {
+    setReferences((prev) => prev.filter(r => r.id !== id));
+  };
+
+  const renameReference = (id, name) => {
+    setReferences((prev) => prev.map(r => r.id === id ? { ...r, name } : r));
   };
 
   const toggleBlurObject = (label) => {
@@ -131,31 +172,44 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
             
             <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', marginBottom: 20 }}>
               {/* Audio Settings */}
-              <div style={{ flex: 1, minWidth: '250px' }}>
+              <div style={{ flex: 1, minWidth: '250px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-                  <input 
-                    type="checkbox" 
-                    checked={censorAudio} 
+                  <input
+                    type="checkbox"
+                    checked={censorAudio}
                     onChange={(e) => setCensorAudio(e.target.checked)}
                     style={{ width: 18, height: 18 }}
                   />
                   <span>
-                    <strong>Mute PII Audio</strong>
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Mute detected entities like PER, LOC, ORG</div>
+                    <strong>Censor PII Audio</strong>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Targets PER, LOC, ORG</div>
                   </span>
                 </label>
+                <div style={{ padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', opacity: censorAudio ? 1 : 0.5 }}>
+                  <strong style={{ display: 'block', marginBottom: 6, fontSize: '0.9rem' }}>Audio style</strong>
+                  <select
+                    className="censor-select"
+                    value={audioMode}
+                    onChange={(e) => setAudioMode(e.target.value)}
+                    disabled={!censorAudio}
+                  >
+                    <option value="beep">Beep (1 kHz tone)</option>
+                    <option value="muffle">Muffle (low-pass)</option>
+                    <option value="silence">Silence</option>
+                  </select>
+                </div>
               </div>
-              
+
               {/* Vision Settings */}
-              <div style={{ flex: 2, minWidth: '300px' }}>
+              <div style={{ flex: 2, minWidth: '300px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <div style={{ padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-                  <strong style={{ display: 'block', marginBottom: 8 }}>Select Objects to Blur:</strong>
+                  <strong style={{ display: 'block', marginBottom: 8 }}>Select Objects to Censor:</strong>
                   {detectedObjects.length > 0 ? (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                       {detectedObjects.map(obj => (
                         <label key={obj.label} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                          <input 
-                            type="checkbox" 
+                          <input
+                            type="checkbox"
                             checked={blurObjects.includes(obj.label)}
                             onChange={() => toggleBlurObject(obj.label)}
                           />
@@ -167,12 +221,86 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
                     <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>No objects detected yet.</span>
                   )}
                 </div>
+                <div style={{ padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', opacity: blurObjects.length ? 1 : 0.5 }}>
+                  <strong style={{ display: 'block', marginBottom: 6, fontSize: '0.9rem' }}>Video style</strong>
+                  <select
+                    className="censor-select"
+                    value={videoMode}
+                    onChange={(e) => setVideoMode(e.target.value)}
+                    disabled={!blurObjects.length}
+                  >
+                    <option value="blur">Gaussian blur</option>
+                    <option value="pixelate">Pixelate (mosaic)</option>
+                    <option value="box">Black box</option>
+                  </select>
+                </div>
               </div>
             </div>
             
+            {/* Identity-targeted blur */}
+            <div style={{ padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', marginBottom: 16 }}>
+              <strong style={{ display: 'block', marginBottom: 6, fontSize: '0.95rem' }}>
+                Identity-targeted blur <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.8rem' }}>(optional)</span>
+              </strong>
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 10px' }}>
+                Add reference photos and pick a mode. Per-frame face detection follows movement automatically.
+              </p>
+
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 12 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input type="radio" name="faceMode" value="selected" checked={faceMode === 'selected'} onChange={() => setFaceMode('selected')} />
+                  <span style={{ fontSize: '0.88rem' }}>Blur these people</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input type="radio" name="faceMode" value="others" checked={faceMode === 'others'} onChange={() => setFaceMode('others')} />
+                  <span style={{ fontSize: '0.88rem' }}>Blur everyone else</span>
+                </label>
+              </div>
+
+              {references.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+                  {references.map((r) => (
+                    <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: 'rgba(0,0,0,0.2)', border: '1px solid var(--glass-border)', borderRadius: 8 }}>
+                      <img src={r.preview} alt="" style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6 }} />
+                      <input
+                        className="censor-select"
+                        type="text"
+                        placeholder="Name (optional)"
+                        value={r.name}
+                        onChange={(e) => renameReference(r.id, e.target.value)}
+                        style={{ width: 120, padding: '4px 8px', fontSize: '0.82rem' }}
+                      />
+                      <button className="btn btn-outline" style={{ padding: '4px 10px', fontSize: '0.72rem' }} onClick={() => removeReference(r.id)}>
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <label className="btn btn-outline" style={{ cursor: 'pointer', display: 'inline-block' }}>
+                + Add reference photo
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  multiple
+                  onChange={addReference}
+                  style={{ display: 'none' }}
+                />
+              </label>
+
+              {faceMode === 'others' && references.length === 0 && (
+                <p style={{ fontSize: '0.8rem', color: 'var(--accent-secondary)', marginTop: 8 }}>
+                  No references — every detected face will be blurred (full anonymization).
+                </p>
+              )}
+            </div>
+
             <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
               <button className="btn btn-outline" onClick={() => setShowConfig(false)}>Cancel</button>
-              <button className="btn btn-danger" onClick={handleCensor}>Start Censorship</button>
+              <button className="btn btn-danger" onClick={handleCensor}>
+                {(references.length > 0 || faceMode === 'others') ? 'Start Face-Tracked Censorship' : 'Start Censorship'}
+              </button>
             </div>
           </div>
         )}
@@ -181,6 +309,32 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
       {/* Worker Progress Chips */}
       <WorkerProgress taskData={taskData} />
 
+      {/* Face blur stats — shown after a face-tracked censorship completes */}
+      {taskData.face_blur_stats?.length > 0 && (
+        <div className="glass-panel" style={{ marginBottom: 20, padding: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+            <span style={{ fontSize: '1.1rem' }}>👤</span>
+            <strong>Identity-aware redaction stats</strong>
+            <span style={{ marginLeft: 'auto', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+              Mode: {taskData.face_blur_mode === 'others' ? 'Blur everyone else' : 'Blur selected'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+            {taskData.face_blur_stats.map((s, i) => (
+              <div key={i} style={{ padding: '8px 12px', background: 'rgba(255,255,255,0.04)', borderRadius: 6, border: '1px solid var(--glass-border)', minWidth: 180 }}>
+                <div style={{ fontWeight: 600, fontSize: '0.92rem' }}>{s.name}</div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  Blurred in <span style={{ color: 'var(--accent-primary)', fontWeight: 600 }}>{s.matched_frames}</span> frames
+                  {s.peak_similarity != null && (
+                    <span> · peak sim {s.peak_similarity}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Video Section */}
       {(originalUrl || censoredUrl) && (
         <div className="video-section">
@@ -188,7 +342,7 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
             <div className="video-comparison">
               <div className="video-pane glass-panel" style={{ padding: 12 }}>
                 <span className="video-label original">Original</span>
-                <video controls src={originalUrl} />
+                <video ref={originalVideoRef} controls src={originalUrl} />
               </div>
               <div className="video-pane glass-panel" style={{ padding: 12 }}>
                 <span className="video-label censored">✓ Censored</span>
@@ -199,7 +353,7 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
             <div className="glass-panel" style={{ padding: 12, marginBottom: 24 }}>
               <div className="video-pane">
                 <span className="video-label original">Original Upload</span>
-                <video controls src={originalUrl} style={{ width: '100%', borderRadius: 'var(--radius-md)', background: '#000' }} />
+                <video ref={originalVideoRef} controls src={originalUrl} style={{ width: '100%', borderRadius: 'var(--radius-md)', background: '#000' }} />
               </div>
             </div>
           )}
@@ -209,18 +363,16 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
       {/* Analysis Grid */}
       <div className="dashboard-grid">
         {/* Transcription */}
-        <div className="dashboard-card glass-panel">
+        <div className="dashboard-card glass-panel transcript-card">
           <div className="card-header">
             <span className="card-icon">🎤</span>
             <h3>Speech Transcript</h3>
           </div>
-          {taskData.transcript ? (
-            <div className="text-transcript">{taskData.transcript}</div>
-          ) : (
-            <p className="pulse-text" style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-              Waiting for Whisper ASR...
-            </p>
-          )}
+          <InteractiveTranscript
+            chunks={taskData.transcription_metadata?.chunks}
+            videoRef={originalVideoRef}
+            fallbackText={taskData.transcript}
+          />
         </div>
 
         {/* NER */}

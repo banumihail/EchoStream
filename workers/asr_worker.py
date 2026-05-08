@@ -83,6 +83,42 @@ class ASRWorker(BaseWorker):
         video.close()
         print(f"  Audio saved to: {audio_path}")
 
+    @staticmethod
+    def _clamp_inflated_word_timestamps(chunks, max_duration=1.5):
+        """
+        Whisper systematically allocates leading/trailing audio (intros, music,
+        silence) to the first and last transcribed words, producing absurd
+        durations like "For" = 14.5s. Detect any word whose duration exceeds
+        max_duration and shrink it to a realistic length based on word length,
+        anchoring to the side that's most likely correct.
+        """
+        if not chunks:
+            return chunks
+        fixed = []
+        n = len(chunks)
+        for i, c in enumerate(chunks):
+            ts = c.get("timestamp")
+            if not ts or ts[0] is None or ts[1] is None or ts[1] <= ts[0]:
+                fixed.append(c)
+                continue
+            start, end = ts
+            if (end - start) <= max_duration:
+                fixed.append(c)
+                continue
+            word = (c.get("text") or "").strip()
+            est = max(0.2, min(max_duration, len(word) * 0.08))
+            if i == 0:
+                fixed.append({**c, "timestamp": (max(0.0, end - est), end)})
+            elif i == n - 1:
+                fixed.append({**c, "timestamp": (start, start + est)})
+            else:
+                prev_end = chunks[i - 1].get("timestamp", (start, start))[1] or start
+                next_start = chunks[i + 1].get("timestamp", (end, end))[0] or end
+                anchored_start = max(start, prev_end)
+                anchored_end = min(end, max(next_start, anchored_start + est))
+                fixed.append({**c, "timestamp": (anchored_start, anchored_end)})
+        return fixed
+
     def transcribe_audio(self, audio_path: str) -> dict:
         """
         Transcribe audio using Whisper
@@ -95,11 +131,17 @@ class ASRWorker(BaseWorker):
         """
         print(f"  [2/3] Transcribing audio with Whisper...")
         # return_timestamps is essential for Active Censorship to get accurate chunk timecodes
+        # Word-level timestamps — every word gets its own (start, end). This fixes
+        # Whisper's long-form sentence-stitching drift (which can produce 24s
+        # "first sentence" or end-before-start chunks on >30s audio) and lets the
+        # frontend highlight per word and seek per word.
         result = self.transcriber(
             audio_path,
-            return_timestamps=True,
+            return_timestamps="word",
             generate_kwargs={"language": "en", "condition_on_prev_tokens": False, "temperature": 0}
         )
+        if isinstance(result.get("chunks"), list):
+            result["chunks"] = self._clamp_inflated_word_timestamps(result["chunks"])
         print(f"  Transcription complete!")
         return result
 

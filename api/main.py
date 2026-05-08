@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
@@ -24,6 +24,12 @@ from pydantic import BaseModel
 class CensorRequest(BaseModel):
     censor_audio: bool = True
     blur_objects: list[str] = ["person"]
+    video_mode: str = "blur"   # box | blur | pixelate
+    audio_mode: str = "beep"   # silence | beep | muffle
+
+
+class UrlUploadRequest(BaseModel):
+    url: str
 
 app = FastAPI(title="EchoStream API")
 
@@ -128,17 +134,62 @@ def get_task(task_id: str):
     return task
 
 @app.post("/tasks/{task_id}/censor")
-def censor_video(task_id: str, request: CensorRequest):
-    """Trigger the Active Censorship pipeline for a specific task"""
+async def censor_video(
+    task_id: str,
+    censor_audio: bool = Form(True),
+    blur_objects: str = Form("person"),    # comma-separated to keep multipart simple
+    video_mode: str = Form("blur"),
+    audio_mode: str = Form("beep"),
+    face_mode: str = Form("selected"),     # 'selected' | 'others'
+    reference_names: str = Form(""),       # comma-separated, aligned with reference_faces
+    reference_faces: list[UploadFile] = File(default=[]),
+):
+    """Trigger the Active Censorship pipeline. If reference photos are uploaded,
+    the worker switches to per-frame face-tracking blur. With face_mode='selected'
+    it blurs faces matching any reference; with 'others' it blurs everyone NOT
+    matching a reference (anonymize-bystanders)."""
     es = get_es_client()
     task = es.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    if face_mode not in ("selected", "others"):
+        raise HTTPException(status_code=400, detail="face_mode must be 'selected' or 'others'")
+
+    names = [n.strip() for n in reference_names.split(",")] if reference_names else []
+    face_refs = []
+    if reference_faces:
+        ref_dir = os.path.join(UPLOAD_DIR, "refs")
+        os.makedirs(ref_dir, exist_ok=True)
+        for i, rf in enumerate(reference_faces):
+            if not rf or not rf.filename:
+                continue
+            ext = os.path.splitext(rf.filename)[1].lower() or ".jpg"
+            if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+                raise HTTPException(status_code=400, detail=f"Unsupported reference image type: {ext}")
+            ref_filename = f"{task_id}_{i}_{uuid.uuid4().hex[:8]}{ext}"
+            ref_full_path = os.path.join(ref_dir, ref_filename)
+            with open(ref_full_path, "wb") as f:
+                f.write(await rf.read())
+            rel = os.path.relpath(ref_full_path, _PROJECT_ROOT).replace("\\", "/")
+            face_refs.append({
+                "path": rel,
+                "name": (names[i] if i < len(names) and names[i] else f"Person {i + 1}"),
+            })
+
+    if face_mode == "selected" and not face_refs:
+        # 'selected' without references is a no-op for face blur — fall through to FFmpeg path.
+        pass
+
     censor_payload = {
         "task_id": task_id,
         "file_path": task.get("file_path"),
-        "censor_audio": request.censor_audio,
-        "blur_objects": request.blur_objects
+        "censor_audio": censor_audio,
+        "blur_objects": [s.strip() for s in blur_objects.split(",") if s.strip()],
+        "video_mode": video_mode,
+        "audio_mode": audio_mode,
+        "face_mode": face_mode,
+        "face_references": face_refs,
     }
     client = get_rabbitmq_client()
     client.publish_message(CENSOR_QUEUE, censor_payload)
@@ -179,6 +230,77 @@ def delete_task(task_id: str):
     safe_delete(task.get("audio_path"))
 
     return {"message": "Task and files deleted successfully"}
+
+
+@app.post("/upload-url", response_model=VideoProcessingResponse)
+def upload_url(payload: UrlUploadRequest):
+    """Download a video by URL via yt-dlp, then enqueue it through the same
+    pipeline as direct uploads. Supports YouTube, Twitter, Vimeo, and ~1000
+    other sites yt-dlp covers."""
+    import yt_dlp
+
+    url = (payload.url or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+
+    task_id = str(uuid.uuid4())
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Force the output to .mp4 so the rest of the pipeline (which assumes .mp4
+    # for the censored-output path replacement) works without special-casing.
+    out_template = os.path.join(UPLOAD_DIR, f"{timestamp}_{task_id}.%(ext)s")
+    ydl_opts = {
+        "outtmpl": out_template,
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+        downloaded_path = ydl.prepare_filename(info).rsplit(".", 1)[0] + ".mp4"
+    except yt_dlp.utils.DownloadError as e:
+        raise HTTPException(status_code=400, detail=f"Could not download video: {str(e)[:200]}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"yt-dlp failure: {str(e)[:200]}")
+
+    if not os.path.exists(downloaded_path):
+        # Fallback: yt-dlp sometimes keeps the original ext when no merge is needed
+        for cand_ext in ("webm", "mkv", "mov"):
+            cand = os.path.join(UPLOAD_DIR, f"{timestamp}_{task_id}.{cand_ext}")
+            if os.path.exists(cand):
+                downloaded_path = cand
+                break
+        else:
+            raise HTTPException(status_code=500, detail="Download finished but file not found.")
+
+    relative_file_path = os.path.relpath(downloaded_path, _PROJECT_ROOT).replace("\\", "/")
+    title = info.get("title") or os.path.basename(downloaded_path)
+
+    task = VideoProcessingTask(
+        task_id=task_id,
+        filename=title,
+        file_path=relative_file_path,
+        uploaded_at=datetime.now().isoformat(),
+        status="pending",
+    )
+
+    es = get_es_client()
+    es.create_task(task.model_dump())
+
+    client = get_rabbitmq_client()
+    client.publish_message(RABBITMQ_QUEUE, task.model_dump())
+    client.publish_message(AUDIO_EVENT_QUEUE, task.model_dump())
+    client.publish_message(VISION_QUEUE, task.model_dump())
+    client.close()
+
+    return VideoProcessingResponse(
+        task_id=task_id,
+        filename=title,
+        status="queued",
+        message="Video downloaded and queued for processing",
+    )
 
 
 @app.post("/upload-video", response_model=VideoProcessingResponse)

@@ -7,6 +7,7 @@ const UploadDashboard = ({ onUploadSuccess }) => {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState('');
+  const [url, setUrl] = useState('');
   const fileInputRef = useRef(null);
 
   const processFile = async (file) => {
@@ -35,6 +36,38 @@ const UploadDashboard = ({ onUploadSuccess }) => {
     } catch (err) {
       console.error(err);
       setError('Upload failed. Is the API server running?');
+    } finally {
+      setUploading(false);
+      setProgress('');
+    }
+  };
+
+  const submitUrl = async () => {
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    if (!/^https?:\/\//i.test(trimmed)) {
+      setError('URL must start with http:// or https://');
+      return;
+    }
+    setUploading(true);
+    setError(null);
+    setProgress('Downloading video from URL...');
+    try {
+      const res = await fetch(`${API_URL}/upload-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: trimmed }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `Upload failed (${res.status})`);
+      }
+      setProgress('Queuing AI workers...');
+      const data = await res.json();
+      onUploadSuccess(data.task_id);
+    } catch (err) {
+      console.error(err);
+      setError(err.message || 'Could not download video from URL.');
     } finally {
       setUploading(false);
       setProgress('');
@@ -77,6 +110,27 @@ const UploadDashboard = ({ onUploadSuccess }) => {
             onChange={(e) => e.target.files?.length && processFile(e.target.files[0])}
             disabled={uploading}
           />
+        </div>
+
+        {/* URL submit — paste a link from YouTube, Twitter, Vimeo, etc. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 16 }}>
+          <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>or paste URL</span>
+          <input
+            type="text"
+            className="url-input"
+            placeholder="https://youtube.com/watch?v=..."
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !uploading) submitUrl(); }}
+            disabled={uploading}
+          />
+          <button
+            className="btn btn-outline"
+            onClick={submitUrl}
+            disabled={uploading || !url.trim()}
+          >
+            Fetch
+          </button>
         </div>
 
         {error && (
