@@ -3,6 +3,7 @@ ASR (Automatic Speech Recognition) Worker
 Uses OpenAI's Whisper model to transcribe audio from videos
 """
 # Set model cache and FFmpeg paths before importing libraries
+import set_cuda_config  # noqa: F401  — must precede torch import
 import set_model_cache
 import set_ffmpeg_path
 
@@ -42,11 +43,12 @@ class ASRWorker(BaseWorker):
         self.device = 0 if torch.cuda.is_available() else -1
         gpu_info = f"GPU ({torch.cuda.get_device_name(0)})" if self.device == 0 else "CPU"
 
-        print(f"[{self.worker_name}] Initializing Whisper model on {gpu_info}...")
+        print(f"[{self.worker_name}] Initializing Whisper-base on {gpu_info}...")
 
-        # Using Whisper's native long-form mode (return_timestamps=True at call time).
-        # Do NOT set chunk_length_s here — that triggers an experimental pipeline path
-        # that rejects Whisper-specific generate_kwargs like condition_on_previous_text.
+        # Whisper-base for both short and long mode — keeps the worker simple
+        # and avoids GPU-contention crashes from a second lazy-loaded model.
+        # Do NOT set chunk_length_s — that triggers an experimental pipeline path
+        # that rejects Whisper-specific generate_kwargs like condition_on_prev_tokens.
         self.transcriber = pipeline(
             "automatic-speech-recognition",
             model="openai/whisper-base",
@@ -119,7 +121,7 @@ class ASRWorker(BaseWorker):
                 fixed.append({**c, "timestamp": (anchored_start, anchored_end)})
         return fixed
 
-    def transcribe_audio(self, audio_path: str) -> dict:
+    def transcribe_audio(self, audio_path: str, processing_mode: str = "short") -> dict:
         """
         Transcribe audio using Whisper
 
@@ -129,8 +131,7 @@ class ASRWorker(BaseWorker):
         Returns:
             Dictionary with transcription result
         """
-        print(f"  [2/3] Transcribing audio with Whisper...")
-        # return_timestamps is essential for Active Censorship to get accurate chunk timecodes
+        print(f"  [2/3] Transcribing audio with whisper-base (mode={processing_mode})...")
         # Word-level timestamps — every word gets its own (start, end). This fixes
         # Whisper's long-form sentence-stitching drift (which can produce 24s
         # "first sentence" or end-before-start chunks on >30s audio) and lets the
@@ -173,6 +174,7 @@ class ASRWorker(BaseWorker):
         """
         task_id = task_data["task_id"]
         video_path = task_data["file_path"]
+        processing_mode = task_data.get("processing_mode", "short")
 
         # Mark as processing
         es = self.get_es_client()
@@ -195,7 +197,7 @@ class ASRWorker(BaseWorker):
             # Step 1: Extract audio
             self.extract_audio(video_path, audio_path)
             # Step 2: Transcribe
-            transcription = self.transcribe_audio(audio_path)
+            transcription = self.transcribe_audio(audio_path, processing_mode=processing_mode)
 
             # Step 3: Save results
             self.save_results(task_id, transcription)
@@ -218,6 +220,9 @@ class ASRWorker(BaseWorker):
             if os.path.exists(audio_path):
                 os.remove(audio_path)
                 print(f"  Cleaned up temporary audio file")
+            # Free GPU cache so the next task / other workers see headroom
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

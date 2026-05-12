@@ -1,47 +1,49 @@
 import React, { useState, useEffect, useRef } from 'react';
 import WorkerProgress from './WorkerProgress';
 import InteractiveTranscript from './InteractiveTranscript';
+import { authFetch, API_URL } from '../lib/auth';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const formatDuration = (sec) => {
+  if (!sec || sec <= 0) return null;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}m ${s}s`;
+};
 
 const AnalysisDashboard = ({ taskId, onReset }) => {
   const [taskData, setTaskData] = useState(null);
   const [error, setError] = useState(null);
   const [isCensoring, setIsCensoring] = useState(false);
-  
-  // Configuration State
+
   const [showConfig, setShowConfig] = useState(false);
   const [censorAudio, setCensorAudio] = useState(true);
   const [blurObjects, setBlurObjects] = useState(['person']);
-  const [videoMode, setVideoMode] = useState('blur');     // box | blur | pixelate
-  const [audioMode, setAudioMode] = useState('beep');     // silence | beep | muffle
-  const [faceMode, setFaceMode] = useState('selected');   // selected | others
-  // Each entry: { id, file, name, preview }
+  const [videoMode, setVideoMode] = useState('blur');
+  const [audioMode, setAudioMode] = useState('beep');
+  const [faceMode, setFaceMode] = useState('selected');
   const [references, setReferences] = useState([]);
 
-  // Ref to the original video element so the interactive transcript can seek it
   const originalVideoRef = useRef(null);
 
   useEffect(() => {
     let active = true;
     const poll = async () => {
       try {
-        const res = await fetch(`${API_URL}/tasks/${taskId}`);
+        const res = await authFetch(`/tasks/${taskId}`);
         if (!res.ok) throw new Error('Could not fetch task data');
         const data = await res.json();
         if (active) {
           setTaskData(data);
           setError(null);
           if (data.status === 'censored') setIsCensoring(false);
-          
-          // Auto-select objects if they were detected
+
           if (data.vision_analysis && data.vision_analysis.summary && blurObjects.length === 1 && blurObjects[0] === 'person') {
-              const detectedLabels = data.vision_analysis.summary.map(s => s.label);
-              if (detectedLabels.includes('person')) {
-                 setBlurObjects(['person']);
-              } else if (detectedLabels.length > 0) {
-                 setBlurObjects([]); // Or default to something else
-              }
+            const detectedLabels = data.vision_analysis.summary.map(s => s.label);
+            if (detectedLabels.includes('person')) {
+              setBlurObjects(['person']);
+            } else if (detectedLabels.length > 0) {
+              setBlurObjects([]);
+            }
           }
         }
       } catch (err) {
@@ -63,10 +65,9 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
       fd.append('video_mode', videoMode);
       fd.append('audio_mode', audioMode);
       fd.append('face_mode', faceMode);
-      // Names array kept in lockstep with files
       fd.append('reference_names', references.map(r => r.name || '').join(','));
       for (const ref of references) fd.append('reference_faces', ref.file);
-      await fetch(`${API_URL}/tasks/${taskId}/censor`, { method: 'POST', body: fd });
+      await authFetch(`/tasks/${taskId}/censor`, { method: 'POST', body: fd });
     } catch (err) {
       console.error(err);
       setIsCensoring(false);
@@ -88,197 +89,229 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
       };
       reader.readAsDataURL(file);
     });
-    // reset input so the same file can be re-added later
     e.target.value = '';
   };
 
-  const removeReference = (id) => {
-    setReferences((prev) => prev.filter(r => r.id !== id));
-  };
-
-  const renameReference = (id, name) => {
-    setReferences((prev) => prev.map(r => r.id === id ? { ...r, name } : r));
-  };
-
-  const toggleBlurObject = (label) => {
-    setBlurObjects(prev => 
-      prev.includes(label) ? prev.filter(l => l !== label) : [...prev, label]
-    );
-  };
+  const removeReference = (id) => setReferences((prev) => prev.filter(r => r.id !== id));
+  const renameReference = (id, name) => setReferences((prev) => prev.map(r => r.id === id ? { ...r, name } : r));
+  const toggleBlurObject = (label) =>
+    setBlurObjects(prev => prev.includes(label) ? prev.filter(l => l !== label) : [...prev, label]);
 
   if (!taskData) {
     return (
-      <div className="glass-panel fade-in" style={{ textAlign: 'center', padding: '60px 24px' }}>
-        <div className="spinner" style={{ margin: '0 auto 20px' }} />
-        <h2 className="pulse-text" style={{ marginBottom: 8 }}>Syncing with AI Engines...</h2>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Task: {taskId.slice(0, 8)}...</p>
+      <div className="fade-in" style={{ textAlign: 'center', padding: '120px 24px' }}>
+        <div className="numeral-huge" style={{ marginBottom: 20 }}>00</div>
+        <div className="smallcaps smallcaps-acid pulse-text" style={{ marginBottom: 8 }}>
+          Connecting to console
+        </div>
+        <p className="serif-italic" style={{ fontSize: 22, color: 'var(--bone-2)' }}>
+          syncing case <span className="mono" style={{ color: 'var(--acid)' }}>{taskId.slice(0, 8)}</span>
+        </p>
       </div>
     );
   }
 
-  // Can censor if it has PII or if there are objects we can blur
   const hasObjects = taskData.vision_analysis?.summary?.length > 0;
   const canCensor = taskData.has_pii || hasObjects;
-  const showCensorBtn = !isCensoring && canCensor &&
-    ['completed', 'analyzing'].includes(taskData.status);
-    
+  const showCensorBtn = !isCensoring && canCensor && ['completed', 'analyzing'].includes(taskData.status);
+
   const hasCensored = taskData.status === 'censored' && taskData.censored_file_path;
   const originalUrl = taskData.file_path ? `${API_URL}/${taskData.file_path}` : null;
   const censoredUrl = hasCensored ? `${API_URL}/${taskData.censored_file_path}` : null;
-
   const detectedObjects = taskData.vision_analysis?.summary || [];
+
+  const dur = formatDuration(taskData.duration_seconds);
 
   return (
     <div className="fade-in">
-      {/* Error Banner */}
       {error && (
         <div className="error-banner">
-          <span className="error-icon">⚠️</span>
+          <span className="error-banner-tag">Net</span>
           <p>{error}</p>
+          <span />
         </div>
       )}
 
-      {/* Status Header */}
-      <div className="glass-panel" style={{ marginBottom: 20 }}>
-        <div className="status-header">
-          <div className="status-header-left">
-            <h2>🎬 <span style={{ color: 'var(--accent-secondary)' }}>{taskData.filename}</span></h2>
-            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-              <span className={`badge ${taskData.status}`}>{taskData.status?.toUpperCase()}</span>
-              {taskData.has_pii && <span className="badge pii">⚠ PII DETECTED</span>}
-            </div>
+      {/* CASE HEADER */}
+      <div className="case-header slate--marks">
+        <div className="case-header-left">
+          <div className="case-header-eyebrow">
+            <span className="section-num">02 — Case</span>
+            <span className="case-header-id">id · {taskId.slice(0, 12)}</span>
           </div>
-          <div className="status-header-right">
-            {showCensorBtn && !showConfig && (
-              <button className="btn btn-danger" onClick={() => setShowConfig(true)}>
-                🛡️ Configure Censorship
-              </button>
+          <h2 className="case-header-title">{taskData.filename}</h2>
+          <div className="case-header-meta">
+            <span className={`badge ${taskData.status}`}>{taskData.status}</span>
+            {taskData.has_pii && <span className="badge pii">PII detected</span>}
+            {taskData.processing_mode === 'long' && (
+              <span
+                className="badge long-mode"
+                title="Long-form processing: Whisper-small + sparse vision sampling + audio-event timeline"
+              >
+                Long-form
+              </span>
             )}
-            {(isCensoring || taskData.status === 'censoring') && (
-              <button className="btn btn-outline" disabled>
-                <div className="spinner" /> Rendering...
-              </button>
-            )}
-            <button className="btn btn-outline" onClick={onReset}>
-              ✚ New Video
-            </button>
+            {dur && <span className="badge duration">{dur}</span>}
           </div>
         </div>
-        
-        {/* Configuration Panel */}
+
+        <div className="case-header-actions">
+          {showCensorBtn && !showConfig && (
+            <button className="btn btn-primary" onClick={() => setShowConfig(true)}>
+              Configure redaction
+            </button>
+          )}
+          {(isCensoring || taskData.status === 'censoring') && (
+            <button className="btn btn-outline" disabled>
+              <div className="spinner" /> Rendering
+            </button>
+          )}
+          <button className="btn btn-ghost" onClick={onReset}>
+            ← New case
+          </button>
+        </div>
+
+        {/* CONFIG PANEL */}
         {showConfig && (
-          <div className="fade-in" style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--glass-border)' }}>
-            <h3 style={{ marginBottom: 12, fontSize: '1.1rem' }}>Censorship Settings</h3>
-            
-            <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', marginBottom: 20 }}>
-              {/* Audio Settings */}
-              <div style={{ flex: 1, minWidth: '250px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+          <div className="config-block fade-in" style={{ gridColumn: '1 / -1' }}>
+            <div className="section-head" style={{ marginBottom: 18, paddingBottom: 12 }}>
+              <span className="section-num">02·a</span>
+              <h3 className="section-title" style={{ fontSize: 22 }}>Redaction <em>parameters</em></h3>
+              <span />
+            </div>
+
+            <div className="config-grid">
+              {/* AUDIO */}
+              <div className="config-card">
+                <div className="config-card-title">
+                  <span className="num">A —</span> Audio redaction
+                </div>
+
+                <label className="check-row">
                   <input
                     type="checkbox"
+                    className="check"
                     checked={censorAudio}
                     onChange={(e) => setCensorAudio(e.target.checked)}
-                    style={{ width: 18, height: 18 }}
                   />
                   <span>
-                    <strong>Censor PII Audio</strong>
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Targets PER, LOC, ORG</div>
+                    <strong>Mute PII speech</strong>
+                    <span className="hint">Targets PER · LOC · ORG</span>
                   </span>
                 </label>
-                <div style={{ padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', opacity: censorAudio ? 1 : 0.5 }}>
-                  <strong style={{ display: 'block', marginBottom: 6, fontSize: '0.9rem' }}>Audio style</strong>
+
+                <div style={{ opacity: censorAudio ? 1 : 0.4, pointerEvents: censorAudio ? 'auto' : 'none' }}>
+                  <span className="field-label">Method</span>
                   <select
-                    className="censor-select"
+                    className="select-input"
                     value={audioMode}
                     onChange={(e) => setAudioMode(e.target.value)}
                     disabled={!censorAudio}
                   >
-                    <option value="beep">Beep (1 kHz tone)</option>
-                    <option value="muffle">Muffle (low-pass)</option>
+                    <option value="beep">Beep — 1 kHz tone</option>
+                    <option value="muffle">Muffle — low-pass</option>
                     <option value="silence">Silence</option>
                   </select>
                 </div>
               </div>
 
-              {/* Vision Settings */}
-              <div style={{ flex: 2, minWidth: '300px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div style={{ padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-                  <strong style={{ display: 'block', marginBottom: 8 }}>Select Objects to Censor:</strong>
-                  {detectedObjects.length > 0 ? (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-                      {detectedObjects.map(obj => (
-                        <label key={obj.label} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                          <input
-                            type="checkbox"
-                            checked={blurObjects.includes(obj.label)}
-                            onChange={() => toggleBlurObject(obj.label)}
-                          />
-                          <span style={{ fontSize: '0.9rem' }}>{obj.label} ({obj.count})</span>
-                        </label>
-                      ))}
-                    </div>
-                  ) : (
-                    <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>No objects detected yet.</span>
-                  )}
+              {/* VIDEO */}
+              <div className="config-card">
+                <div className="config-card-title">
+                  <span className="num">B —</span> Visual redaction
                 </div>
-                <div style={{ padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', opacity: blurObjects.length ? 1 : 0.5 }}>
-                  <strong style={{ display: 'block', marginBottom: 6, fontSize: '0.9rem' }}>Video style</strong>
+
+                <span className="field-label">Targets</span>
+                {detectedObjects.length > 0 ? (
+                  <div className="object-grid" style={{ marginBottom: 16 }}>
+                    {detectedObjects.map(obj => (
+                      <label key={obj.label} className="object-chip">
+                        <input
+                          type="checkbox"
+                          className="check"
+                          checked={blurObjects.includes(obj.label)}
+                          onChange={() => toggleBlurObject(obj.label)}
+                        />
+                        <span>{obj.label}</span>
+                        <span className="count">×{obj.count}</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="smallcaps" style={{ marginBottom: 16 }}>No objects detected yet.</p>
+                )}
+
+                <div style={{ opacity: blurObjects.length ? 1 : 0.4 }}>
+                  <span className="field-label">Method</span>
                   <select
-                    className="censor-select"
+                    className="select-input"
                     value={videoMode}
                     onChange={(e) => setVideoMode(e.target.value)}
                     disabled={!blurObjects.length}
                   >
                     <option value="blur">Gaussian blur</option>
-                    <option value="pixelate">Pixelate (mosaic)</option>
-                    <option value="box">Black box</option>
+                    <option value="pixelate">Mosaic / pixelate</option>
+                    <option value="box">Solid black box</option>
                   </select>
                 </div>
               </div>
             </div>
-            
-            {/* Identity-targeted blur */}
-            <div style={{ padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', marginBottom: 16 }}>
-              <strong style={{ display: 'block', marginBottom: 6, fontSize: '0.95rem' }}>
-                Identity-targeted blur <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.8rem' }}>(optional)</span>
-              </strong>
-              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 10px' }}>
+
+            {/* IDENTITY */}
+            <div className="config-card" style={{ marginBottom: 0 }}>
+              <div className="config-card-title">
+                <span className="num">C —</span> Identity-aware face redaction
+                <span style={{ marginLeft: 'auto', color: 'var(--bone-faint)', fontWeight: 400 }}>optional</span>
+              </div>
+              <p className="smallcaps" style={{ marginBottom: 16, lineHeight: 1.5, maxWidth: 540 }}>
                 Add reference photos and pick a mode. Per-frame face detection follows movement automatically.
               </p>
 
-              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 12 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                  <input type="radio" name="faceMode" value="selected" checked={faceMode === 'selected'} onChange={() => setFaceMode('selected')} />
-                  <span style={{ fontSize: '0.88rem' }}>Blur these people</span>
+              <div style={{ display: 'flex', gap: 24, marginBottom: 18, flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="faceMode"
+                    className="radio"
+                    value="selected"
+                    checked={faceMode === 'selected'}
+                    onChange={() => setFaceMode('selected')}
+                  />
+                  <span style={{ fontSize: 13, color: 'var(--bone)' }}>Blur these people</span>
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                  <input type="radio" name="faceMode" value="others" checked={faceMode === 'others'} onChange={() => setFaceMode('others')} />
-                  <span style={{ fontSize: '0.88rem' }}>Blur everyone else</span>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="faceMode"
+                    className="radio"
+                    value="others"
+                    checked={faceMode === 'others'}
+                    onChange={() => setFaceMode('others')}
+                  />
+                  <span style={{ fontSize: 13, color: 'var(--bone)' }}>Blur everyone else</span>
                 </label>
               </div>
 
               {references.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
-                  {references.map((r) => (
-                    <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: 'rgba(0,0,0,0.2)', border: '1px solid var(--glass-border)', borderRadius: 8 }}>
-                      <img src={r.preview} alt="" style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6 }} />
+                <div className="reference-grid">
+                  {references.map(r => (
+                    <div key={r.id} className="reference-card">
+                      <img src={r.preview} alt="" />
                       <input
-                        className="censor-select"
                         type="text"
                         placeholder="Name (optional)"
                         value={r.name}
                         onChange={(e) => renameReference(r.id, e.target.value)}
-                        style={{ width: 120, padding: '4px 8px', fontSize: '0.82rem' }}
                       />
-                      <button className="btn btn-outline" style={{ padding: '4px 10px', fontSize: '0.72rem' }} onClick={() => removeReference(r.id)}>
-                        ✕
+                      <button className="reference-x" onClick={() => removeReference(r.id)} aria-label="Remove">
+                        ×
                       </button>
                     </div>
                   ))}
                 </div>
               )}
 
-              <label className="btn btn-outline" style={{ cursor: 'pointer', display: 'inline-block' }}>
+              <label className="btn btn-outline btn-sm" style={{ cursor: 'pointer' }}>
                 + Add reference photo
                 <input
                   type="file"
@@ -290,44 +323,44 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
               </label>
 
               {faceMode === 'others' && references.length === 0 && (
-                <p style={{ fontSize: '0.8rem', color: 'var(--accent-secondary)', marginTop: 8 }}>
+                <p className="smallcaps" style={{ color: 'var(--ember)', marginTop: 12 }}>
                   No references — every detected face will be blurred (full anonymization).
                 </p>
               )}
             </div>
 
-            <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
-              <button className="btn btn-outline" onClick={() => setShowConfig(false)}>Cancel</button>
-              <button className="btn btn-danger" onClick={handleCensor}>
-                {(references.length > 0 || faceMode === 'others') ? 'Start Face-Tracked Censorship' : 'Start Censorship'}
+            <div className="config-actions">
+              <button className="btn btn-ghost" onClick={() => setShowConfig(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleCensor}>
+                {(references.length > 0 || faceMode === 'others')
+                  ? 'Begin face-tracked render →'
+                  : 'Begin render →'}
               </button>
             </div>
           </div>
         )}
       </div>
 
-      {/* Worker Progress Chips */}
+      {/* WORKERS */}
       <WorkerProgress taskData={taskData} />
 
-      {/* Face blur stats — shown after a face-tracked censorship completes */}
+      {/* FACE BLUR STATS */}
       {taskData.face_blur_stats?.length > 0 && (
-        <div className="glass-panel" style={{ marginBottom: 20, padding: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-            <span style={{ fontSize: '1.1rem' }}>👤</span>
-            <strong>Identity-aware redaction stats</strong>
-            <span style={{ marginLeft: 'auto', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-              Mode: {taskData.face_blur_mode === 'others' ? 'Blur everyone else' : 'Blur selected'}
+        <div style={{ marginBottom: 24 }}>
+          <div className="section-head">
+            <span className="section-num">02·c</span>
+            <h3 className="section-title" style={{ fontSize: 22 }}>Identity ledger</h3>
+            <span className="section-meta">
+              Mode · {taskData.face_blur_mode === 'others' ? 'blur others' : 'blur selected'}
             </span>
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+          <div className="fblur-stats">
             {taskData.face_blur_stats.map((s, i) => (
-              <div key={i} style={{ padding: '8px 12px', background: 'rgba(255,255,255,0.04)', borderRadius: 6, border: '1px solid var(--glass-border)', minWidth: 180 }}>
-                <div style={{ fontWeight: 600, fontSize: '0.92rem' }}>{s.name}</div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                  Blurred in <span style={{ color: 'var(--accent-primary)', fontWeight: 600 }}>{s.matched_frames}</span> frames
-                  {s.peak_similarity != null && (
-                    <span> · peak sim {s.peak_similarity}</span>
-                  )}
+              <div key={i} className="fblur-stat">
+                <div className="fblur-name">{s.name}</div>
+                <div className="fblur-detail">
+                  <strong>{s.matched_frames}</strong> frames matched
+                  {s.peak_similarity != null && <> · peak <strong>{s.peak_similarity}</strong></>}
                 </div>
               </div>
             ))}
@@ -335,38 +368,53 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
         </div>
       )}
 
-      {/* Video Section */}
+      {/* VIDEO */}
       {(originalUrl || censoredUrl) && (
         <div className="video-section">
+          <div className="section-head">
+            <span className="section-num">03 — Footage</span>
+            <h3 className="section-title">
+              {hasCensored ? <>Side-by-<em>side</em></> : <>Source <em>preview</em></>}
+            </h3>
+            <span className="section-meta">{hasCensored ? 'Original / Redacted' : 'Single feed'}</span>
+          </div>
+
           {hasCensored ? (
             <div className="video-comparison">
-              <div className="video-pane glass-panel" style={{ padding: 12 }}>
-                <span className="video-label original">Original</span>
+              <div className="video-pane">
+                <span className="video-stamp original">Original</span>
                 <video ref={originalVideoRef} controls src={originalUrl} />
               </div>
-              <div className="video-pane glass-panel" style={{ padding: 12 }}>
-                <span className="video-label censored">✓ Censored</span>
+              <div className="video-pane">
+                <span className="video-stamp censored">Redacted</span>
                 <video controls src={censoredUrl} />
               </div>
             </div>
           ) : originalUrl && (
-            <div className="glass-panel" style={{ padding: 12, marginBottom: 24 }}>
-              <div className="video-pane">
-                <span className="video-label original">Original Upload</span>
-                <video ref={originalVideoRef} controls src={originalUrl} style={{ width: '100%', borderRadius: 'var(--radius-md)', background: '#000' }} />
-              </div>
+            <div className="video-pane" style={{ maxWidth: 960 }}>
+              <span className="video-stamp original">Source</span>
+              <video ref={originalVideoRef} controls src={originalUrl} />
             </div>
           )}
         </div>
       )}
 
-      {/* Analysis Grid */}
+      {/* ANALYSIS */}
+      <div className="section-head">
+        <span className="section-num">04 — Findings</span>
+        <h3 className="section-title">Analytical <em>read</em></h3>
+        <span className="section-meta">Four parallel pipelines</span>
+      </div>
+
       <div className="dashboard-grid">
-        {/* Transcription */}
-        <div className="dashboard-card glass-panel transcript-card">
-          <div className="card-header">
-            <span className="card-icon">🎤</span>
-            <h3>Speech Transcript</h3>
+        {/* Transcript */}
+        <div className="dashboard-card slate transcript-card">
+          <div className="card-head">
+            <div className="card-head-left">
+              <span className="card-num">04·1</span>
+              <h3>Speech transcript</h3>
+            </div>
+            <span className="card-meta">Whisper</span>
           </div>
           <InteractiveTranscript
             chunks={taskData.transcription_metadata?.chunks}
@@ -376,82 +424,105 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
         </div>
 
         {/* NER */}
-        <div className="dashboard-card glass-panel">
-          <div className="card-header">
-            <span className="card-icon">🧠</span>
-            <h3>Named Entities (BERT)</h3>
+        <div className="dashboard-card slate">
+          <div className="card-head">
+            <div className="card-head-left">
+              <span className="card-num">04·2</span>
+              <h3>Named entities</h3>
+            </div>
+            <span className="card-meta">BERT NER</span>
           </div>
           {taskData.ner_analysis ? (
             taskData.ner_analysis.flagged_entities?.length > 0 ? (
               <div>
-                <p style={{ color: 'var(--danger)', marginBottom: 10, fontSize: '0.9rem' }}>
-                  Sensitive data identified:
+                <p className="smallcaps" style={{ color: 'var(--alert)', marginBottom: 12 }}>
+                  Sensitive data identified
                 </p>
-                {taskData.ner_analysis.flagged_entities.map((e, i) => (
-                  <span key={i} className="tag tag-danger">
-                    {e.type}: {e.text} ({Math.round(e.score * 100)}%)
-                  </span>
-                ))}
+                <div>
+                  {taskData.ner_analysis.flagged_entities.map((e, i) => (
+                    <span key={i} className="tag-pii">
+                      <span className="pii-type">{e.type}</span>
+                      <span className="pii-text">{e.text}</span>
+                      <span className="pii-score">{Math.round(e.score * 100)}%</span>
+                    </span>
+                  ))}
+                </div>
               </div>
             ) : (
-              <p style={{ color: 'var(--success)', fontSize: '0.9rem' }}>✅ No sensitive PII detected.</p>
+              <p className="serif-italic" style={{ fontSize: 18, color: 'var(--ok)' }}>
+                Clean — no sensitive PII detected.
+              </p>
             )
           ) : (
-            <p className="pulse-text" style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-              Analyzing transcript for PII...
-            </p>
+            <p className="pulse-text smallcaps">Analyzing transcript for PII...</p>
           )}
         </div>
 
-        {/* Audio Events */}
-        <div className="dashboard-card glass-panel">
-          <div className="card-header">
-            <span className="card-icon">🔊</span>
-            <h3>Audio Environment (AST)</h3>
+        {/* Audio events */}
+        <div className="dashboard-card slate">
+          <div className="card-head">
+            <div className="card-head-left">
+              <span className="card-num">04·3</span>
+              <h3>Audio environment</h3>
+            </div>
+            <span className="card-meta">AST</span>
           </div>
           {taskData.audio_event_analysis ? (
             <div>
-              {taskData.audio_event_analysis.events.slice(0, 5).map((ev, i) => (
-                <div key={i} style={{
-                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                  padding: '8px 0', borderBottom: i < 4 ? '1px solid var(--glass-border)' : 'none'
-                }}>
-                  <span style={{ fontSize: '0.9rem' }}>{ev.label}</span>
-                  <span style={{
-                    color: 'var(--accent-primary)', fontWeight: 600, fontSize: '0.85rem'
-                  }}>{Math.round(ev.score * 100)}%</span>
+              {taskData.audio_event_analysis.events.slice(0, 5).map((ev, i, arr) => (
+                <div
+                  key={i}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '24px 1fr auto',
+                    gap: 14,
+                    alignItems: 'baseline',
+                    padding: '10px 0',
+                    borderBottom: i < arr.length - 1 ? '1px solid var(--rule)' : 'none',
+                  }}
+                >
+                  <span className="mono" style={{ fontSize: 10, color: 'var(--bone-faint)', letterSpacing: '0.14em' }}>
+                    0{i + 1}
+                  </span>
+                  <span className="serif" style={{ fontSize: 16, color: 'var(--bone)', letterSpacing: '-0.01em' }}>
+                    {ev.label}
+                  </span>
+                  <span className="mono tnum" style={{ fontSize: 12, color: 'var(--acid)', fontWeight: 600 }}>
+                    {Math.round(ev.score * 100)}%
+                  </span>
                 </div>
               ))}
             </div>
           ) : (
-            <p className="pulse-text" style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-              Running spectrogram analysis...
-            </p>
+            <p className="pulse-text smallcaps">Running spectrogram analysis...</p>
           )}
         </div>
 
         {/* Vision */}
-        <div className="dashboard-card glass-panel">
-          <div className="card-header">
-            <span className="card-icon">👁️</span>
-            <h3>Visual Objects (DETR)</h3>
+        <div className="dashboard-card slate">
+          <div className="card-head">
+            <div className="card-head-left">
+              <span className="card-num">04·4</span>
+              <h3>Visual objects</h3>
+            </div>
+            <span className="card-meta">DETR</span>
           </div>
           {taskData.vision_analysis ? (
             taskData.vision_analysis.summary?.length > 0 ? (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 {taskData.vision_analysis.summary.map((obj, i) => (
                   <span key={i} className="tag">
-                    {obj.label} <span style={{ opacity: 0.5 }}>×{obj.count}</span>
+                    {obj.label} <span className="tag-count">×{obj.count}</span>
                   </span>
                 ))}
               </div>
             ) : (
-              <p style={{ fontSize: '0.9rem' }}>No high-confidence objects detected.</p>
+              <p className="serif-italic" style={{ fontSize: 18, color: 'var(--bone-2)' }}>
+                No high-confidence objects detected.
+              </p>
             )
           ) : (
-            <p className="pulse-text" style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-              Extracting and grading frames...
-            </p>
+            <p className="pulse-text smallcaps">Extracting and grading frames...</p>
           )}
         </div>
       </div>
@@ -460,4 +531,3 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
 };
 
 export default AnalysisDashboard;
-

@@ -2,6 +2,7 @@
 NER (Named Entity Recognition) Worker
 Uses BERT-based model to identify and flag sensitive information in transcripts
 """
+import set_cuda_config  # noqa: F401  — must precede torch import
 import os
 import torch
 import json
@@ -29,11 +30,11 @@ class NERWorker(BaseWorker):
         # Initialize Elasticsearch client
         self.es_client = None
 
-        # Check for GPU
-        self.device = 0 if torch.cuda.is_available() else -1
-        gpu_info = f"GPU ({torch.cuda.get_device_name(0)})" if self.device == 0 else "CPU"
-
-        print(f"[{self.worker_name}] Initializing NER model on {gpu_info}...")
+        # NER runs on CPU. BERT-base is fast enough on CPU (it processes one
+        # transcript string per task, not video frames), and keeping it off
+        # the GPU frees ~430 MB VRAM for Whisper, AST, and DETR.
+        self.device = -1
+        print(f"[{self.worker_name}] Initializing NER model on CPU...")
 
         # Initialize NER pipeline with BERT-based model
         self.ner_pipeline = pipeline(

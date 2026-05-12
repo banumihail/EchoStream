@@ -2,6 +2,7 @@
 Audio Event Detection Worker
 Uses AST (Audio Spectrogram Transformer) to classify ambient background sounds and events in videos.
 """
+import set_cuda_config  # noqa: F401  — must precede torch import
 import set_model_cache
 import set_ffmpeg_path
 
@@ -36,12 +37,14 @@ class AudioEventWorker(BaseWorker):
         gpu_info = f"GPU ({torch.cuda.get_device_name(0)})" if self.device == 0 else "CPU"
         print(f"[{self.worker_name}] Initializing AST model on {gpu_info}...")
 
-        # We use a robust audio classification model. 
-        # AST finetuned on AudioSet gives great ambient sound recognition.
+        # AST finetuned on AudioSet for ambient sound recognition. Use FP16 on
+        # GPU to halve VRAM (3.4 GB -> 1.7 GB activation footprint at peak).
+        torch_dtype = torch.float16 if self.device == 0 else torch.float32
         self.audio_classifier = pipeline(
             "audio-classification",
             model="MIT/ast-finetuned-audioset-10-10-0.4593",
-            device=self.device
+            device=self.device,
+            torch_dtype=torch_dtype,
         )
         print(f"[{self.worker_name}] Model loaded successfully!\n")
 
@@ -57,19 +60,49 @@ class AudioEventWorker(BaseWorker):
         video.audio.write_audiofile(audio_path, logger=None)
         video.close()
         
-    def analyze_audio(self, audio_path: str) -> dict:
-        print(f"  [2/3] Analyzing audio events with AST...")
-        # Load audio using librosa to feed to transformers natively
-        # Note: pipeliness can also take filepaths directly.
-        results = self.audio_classifier(audio_path)
-        
-        # results is a list of dicts: [{'score': 0.9, 'label': 'Speech'}, ...]
-        print(f"  Found top event: {results[0]['label']} ({results[0]['score']:.2f})")
-        return {"events": results}
+    def analyze_audio(self, audio_path: str, processing_mode: str = "short") -> dict:
+        if processing_mode != "long":
+            print(f"  [2/3] Analyzing audio events with AST (single-pass)...")
+            results = self.audio_classifier(audio_path)
+            print(f"  Top event: {results[0]['label']} ({results[0]['score']:.2f})")
+            return {"events": results}
+
+        # Long mode: scan in non-overlapping windows so we get a timeline of
+        # events instead of one global "top label" averaged across an hour.
+        print(f"  [2/3] Analyzing audio events in windows (long mode)...")
+        WINDOW_SECONDS = 60  # bumped from 30s -> 60s: half the inferences, equivalent coverage
+        SR = 16000  # AST expects 16 kHz
+        audio, _ = librosa.load(audio_path, sr=SR, mono=True)
+        timeline = []
+        global_counts = {}
+        n_windows = max(1, int(len(audio) // (WINDOW_SECONDS * SR)) + (1 if len(audio) % (WINDOW_SECONDS * SR) else 0))
+        for w in range(n_windows):
+            start = w * WINDOW_SECONDS * SR
+            end = min(len(audio), start + WINDOW_SECONDS * SR)
+            chunk = audio[start:end]
+            if len(chunk) < SR:  # skip windows shorter than 1s
+                continue
+            preds = self.audio_classifier({"raw": chunk, "sampling_rate": SR}, top_k=3)
+            timeline.append({
+                "start": round(start / SR, 2),
+                "end": round(end / SR, 2),
+                "events": preds,
+            })
+            for p in preds:
+                global_counts[p["label"]] = global_counts.get(p["label"], 0) + 1
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        # Build a "top events overall" list ordered by how often they appeared in the top-3 of any window
+        ranked = sorted(global_counts.items(), key=lambda kv: -kv[1])[:8]
+        events_overall = [{"label": lbl, "score": cnt / max(1, n_windows)} for lbl, cnt in ranked]
+        if events_overall:
+            print(f"  Most common event across windows: {events_overall[0]['label']}")
+        return {"events": events_overall, "timeline": timeline}
 
     def process_task(self, task_data: dict):
         task_id = task_data["task_id"]
         video_path = task_data["file_path"]
+        processing_mode = task_data.get("processing_mode", "short")
 
         # Mark as processing
         es = self.get_es_client()
@@ -87,7 +120,7 @@ class AudioEventWorker(BaseWorker):
 
         try:
             self.extract_audio(video_path, audio_path)
-            analysis = self.analyze_audio(audio_path)
+            analysis = self.analyze_audio(audio_path, processing_mode=processing_mode)
 
             print(f"  [3/3] Saving event analysis to DB...")
             es.update_worker_status(

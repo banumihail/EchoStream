@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+import { authFetch } from '../lib/auth';
 
 const TaskHistory = ({ onSelectTask }) => {
   const [tasks, setTasks] = useState([]);
@@ -10,7 +9,7 @@ const TaskHistory = ({ onSelectTask }) => {
   const fetchTasks = async () => {
     try {
       setLoading(true);
-      const res = await fetch(`${API_URL}/tasks`);
+      const res = await authFetch('/tasks');
       if (!res.ok) throw new Error('Failed to fetch tasks');
       const data = await res.json();
       setTasks(data);
@@ -23,11 +22,10 @@ const TaskHistory = ({ onSelectTask }) => {
   };
 
   const handleDelete = async (e, taskId) => {
-    e.stopPropagation(); // Prevent opening the task
-    if (!window.confirm('Are you sure you want to delete this task and its files?')) return;
-    
+    e.stopPropagation();
+    if (!window.confirm('Delete this case file and all of its assets?')) return;
     try {
-      const res = await fetch(`${API_URL}/tasks/${taskId}`, { method: 'DELETE' });
+      const res = await authFetch(`/tasks/${taskId}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete task');
       setTasks(prev => prev.filter(t => t.task_id !== taskId));
     } catch (err) {
@@ -41,64 +39,73 @@ const TaskHistory = ({ onSelectTask }) => {
     if (!dateStr) return '—';
     try {
       const d = new Date(dateStr);
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      const date = d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }).toUpperCase();
+      const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+      return `${date} · ${time}`;
     } catch { return dateStr; }
   };
 
   return (
     <div className="fade-in">
-      <div className="history-header">
-        <h2><span className="gradient-text">Task History</span></h2>
-        <button className="btn btn-outline btn-sm" onClick={fetchTasks}>
-          🔄 Refresh
-        </button>
+      <div className="section-head">
+        <span className="section-num">02 — Dossier</span>
+        <h2 className="section-title">
+          Case <em>archive</em>
+        </h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span className="section-meta">
+            {loading ? '— loading' : `${tasks.length} ${tasks.length === 1 ? 'case' : 'cases'}`}
+          </span>
+          <button className="btn btn-outline btn-sm" onClick={fetchTasks}>
+            ↻ Refresh
+          </button>
+        </div>
       </div>
 
       {error && (
         <div className="error-banner">
-          <span className="error-icon">⚠️</span>
+          <span className="error-banner-tag">Net</span>
           <p>{error}</p>
-          <button className="btn btn-outline btn-sm" onClick={fetchTasks}>Retry</button>
+          <button className="btn btn-ghost btn-sm" onClick={fetchTasks}>Retry</button>
         </div>
       )}
 
       {loading ? (
         <div className="empty-state">
-          <div className="spinner" style={{ margin: '0 auto 16px' }} />
-          <p>Loading tasks...</p>
+          <div className="spinner spinner-lg" style={{ margin: '0 auto 16px' }} />
+          <p>Pulling archive</p>
         </div>
       ) : tasks.length === 0 ? (
-        <div className="glass-panel empty-state">
-          <div className="empty-icon">📭</div>
-          <h3 style={{ marginBottom: 8 }}>No tasks yet</h3>
-          <p>Upload a video to get started with AI analysis.</p>
+        <div className="empty-state">
+          <div className="empty-state-num">00</div>
+          <h3>Empty archive</h3>
+          <p>Submit a video at intake to open the first case</p>
         </div>
       ) : (
-        <div className="task-list">
-          {tasks.map((task) => (
+        <div className="dossier-list">
+          {tasks.map((task, i) => (
             <div
               key={task.task_id}
-              className="glass-panel task-row"
+              className="dossier-row"
               onClick={() => onSelectTask(task.task_id)}
             >
-              <div className="task-row-name">
-                🎬 {task.filename || 'Untitled'}
-              </div>
+              <span className="dossier-idx">
+                {String(tasks.length - i).padStart(3, '0')}
+              </span>
+              <span className="dossier-name">{task.filename || 'Untitled'}</span>
               <span className={`badge ${task.status}`}>
-                {task.status?.toUpperCase()}
+                {task.status}
               </span>
-              <span className="task-row-date">
-                {formatDate(task.updated_at)}
-              </span>
-              <button 
-                className="btn btn-outline btn-sm" 
-                style={{ marginLeft: '12px', padding: '4px 8px', color: '#ff4d4f', borderColor: 'transparent' }}
+              <span className="dossier-date">{formatDate(task.updated_at)}</span>
+              <button
+                className="dossier-delete"
                 onClick={(e) => handleDelete(e, task.task_id)}
-                title="Delete Task"
+                title="Delete case"
+                aria-label="Delete case"
               >
-                🗑️
+                ×
               </button>
-              <span style={{ color: 'var(--text-dim)', fontSize: '0.9rem', marginLeft: '12px' }}>→</span>
+              <span className="dossier-arrow">→</span>
             </div>
           ))}
         </div>

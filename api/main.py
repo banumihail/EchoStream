@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
@@ -19,7 +19,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.rabbitmq_client import RabbitMQClient
 from shared.elasticsearch_client import ElasticsearchClient
 from shared.schemas import VideoProcessingTask, VideoProcessingResponse
+from shared.auth import (
+    hash_password, verify_password,
+    create_access_token, require_user,
+)
 from pydantic import BaseModel
+from fastapi import Request
 
 class CensorRequest(BaseModel):
     censor_audio: bool = True
@@ -52,6 +57,40 @@ RABBITMQ_QUEUE = "video_processing_queue"
 AUDIO_EVENT_QUEUE = "audio_event_queue"
 VISION_QUEUE = "vision_queue"
 CENSOR_QUEUE = "censor_queue"
+
+# Threshold (seconds) above which "auto" mode auto-selects long-form processing.
+LONG_MODE_THRESHOLD_SECONDS = int(os.getenv("LONG_MODE_THRESHOLD_SECONDS", "600"))
+FFPROBE_PATH = os.path.join(_PROJECT_ROOT, "ffmpeg", "ffprobe.exe") if os.name == "nt" else "ffprobe"
+
+
+def probe_duration_seconds(file_path: str) -> float | None:
+    """Return media duration in seconds via ffprobe, or None on failure."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            [FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            capture_output=True, text=True, timeout=20,
+        )
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def resolve_processing_mode(requested: str, file_path: str) -> tuple[str, float | None]:
+    """Resolve processing_mode='auto'|'short'|'long' to a concrete mode.
+    Returns (mode, duration_seconds)."""
+    duration = probe_duration_seconds(file_path)
+    if requested == "long":
+        return "long", duration
+    if requested == "short":
+        return "short", duration
+    # 'auto' or anything else
+    if duration is not None and duration >= LONG_MODE_THRESHOLD_SECONDS:
+        return "long", duration
+    return "short", duration
 
 # Ensure upload directory exists
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -102,6 +141,82 @@ def get_es_client():
     return es_client
 
 
+# ─────────────────────────────────────────────────────────────────
+# Authentication endpoints (Phase 0 — password only; MFA added later)
+# ─────────────────────────────────────────────────────────────────
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    email: str | None = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "0.0.0.0"
+
+
+@app.post("/auth/register")
+def auth_register(payload: RegisterRequest, request: Request):
+    es = get_es_client()
+    username = payload.username.strip().lower()
+    if len(username) < 3 or len(username) > 32 or not username.isalnum():
+        raise HTTPException(status_code=400, detail="Username must be 3-32 alphanumeric characters.")
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    if es.get_user(username):
+        es.log_auth_event({"username": username, "ip": _client_ip(request),
+                           "event_type": "register", "outcome": "denied",
+                           "reason": "username exists"})
+        raise HTTPException(status_code=409, detail="Username already exists.")
+    user_doc = {
+        "username": username,
+        "password_hash": hash_password(payload.password),
+        "email": (payload.email or "").strip().lower() or None,
+        "created_at": datetime.now().isoformat(),
+        "mfa_methods": [],
+        "failed_logins": 0,
+        "locked_until": None,
+    }
+    es.create_user(user_doc)
+    es.log_auth_event({"username": username, "ip": _client_ip(request),
+                       "event_type": "register", "outcome": "ok"})
+    token = create_access_token({"sub": username, "mfa": False})
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.post("/auth/login")
+def auth_login(payload: LoginRequest, request: Request):
+    es = get_es_client()
+    username = payload.username.strip().lower()
+    ip = _client_ip(request)
+    user = es.get_user(username)
+    if not user or not verify_password(payload.password, user["password_hash"]):
+        es.log_auth_event({"username": username, "ip": ip,
+                           "event_type": "login_fail", "mfa_method": "password",
+                           "outcome": "denied", "reason": "bad credentials"})
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    # Phase 0: no MFA enforcement yet. If user has MFA methods, the token still
+    # issues but we'll switch to a two-step flow in Phase 1.
+    token = create_access_token({"sub": username, "mfa": bool(user.get("mfa_methods"))})
+    es.log_auth_event({"username": username, "ip": ip,
+                       "event_type": "login_success", "mfa_method": "password",
+                       "outcome": "ok"})
+    return {"access_token": token, "token_type": "bearer", "username": username,
+            "mfa_methods": user.get("mfa_methods", [])}
+
+
+@app.get("/auth/me")
+def auth_me(user=Depends(require_user)):
+    return {"username": user["sub"], "mfa_passed": user.get("mfa", False)}
+
+
 @app.get("/")
 def read_root():
     return {
@@ -117,21 +232,35 @@ def read_root():
 
 
 @app.get("/tasks")
-def list_tasks():
-    """List all recent tasks"""
+def list_tasks(user=Depends(require_user)):
+    """List the current user's tasks. IDOR mitigation: scoped to owner."""
     es = get_es_client()
-    tasks = es.list_tasks(size=50)
-    return tasks
+    return es.list_tasks(size=50, owner_username=user["sub"])
+
+
+def _task_or_404(es, task_id: str, username: str, request: Request | None = None):
+    """Fetch a task and enforce ownership. Returns 404 (NOT 403) on either a
+    missing task or a foreign-owner one so attackers can't enumerate valid IDs."""
+    task = es.get_task(task_id)
+    if not task or task.get("owner_username") != username:
+        if task and request is not None:
+            # Log the ownership violation — useful for the alerting module.
+            es.log_auth_event({
+                "username": username,
+                "ip": _client_ip(request),
+                "event_type": "idor_attempt",
+                "outcome": "denied",
+                "reason": f"task {task_id} owner={task.get('owner_username')}",
+            })
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
 
 
 @app.get("/tasks/{task_id}")
-def get_task(task_id: str):
-    """Get the current progress and results of a task"""
+def get_task(task_id: str, request: Request, user=Depends(require_user)):
+    """Get the current progress and results of a task (owner-scoped)."""
     es = get_es_client()
-    task = es.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return task
+    return _task_or_404(es, task_id, user["sub"], request)
 
 @app.post("/tasks/{task_id}/censor")
 async def censor_video(
@@ -143,15 +272,15 @@ async def censor_video(
     face_mode: str = Form("selected"),     # 'selected' | 'others'
     reference_names: str = Form(""),       # comma-separated, aligned with reference_faces
     reference_faces: list[UploadFile] = File(default=[]),
+    request: Request = None,
+    user=Depends(require_user),
 ):
     """Trigger the Active Censorship pipeline. If reference photos are uploaded,
     the worker switches to per-frame face-tracking blur. With face_mode='selected'
     it blurs faces matching any reference; with 'others' it blurs everyone NOT
     matching a reference (anonymize-bystanders)."""
     es = get_es_client()
-    task = es.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _task_or_404(es, task_id, user["sub"], request)
 
     if face_mode not in ("selected", "others"):
         raise HTTPException(status_code=400, detail="face_mode must be 'selected' or 'others'")
@@ -199,12 +328,10 @@ async def censor_video(
 
 
 @app.delete("/tasks/{task_id}")
-def delete_task(task_id: str):
-    """Delete a task and its associated files"""
+def delete_task(task_id: str, request: Request, user=Depends(require_user)):
+    """Delete a task and its associated files (owner-scoped)."""
     es = get_es_client()
-    task = es.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task = _task_or_404(es, task_id, user["sub"], request)
         
     # Delete from DB
     es.delete_task(task_id)
@@ -232,8 +359,13 @@ def delete_task(task_id: str):
     return {"message": "Task and files deleted successfully"}
 
 
+class UrlUploadRequestExt(BaseModel):
+    url: str
+    processing_mode: str = "auto"
+
+
 @app.post("/upload-url", response_model=VideoProcessingResponse)
-def upload_url(payload: UrlUploadRequest):
+def upload_url(payload: UrlUploadRequestExt, user=Depends(require_user)):
     """Download a video by URL via yt-dlp, then enqueue it through the same
     pipeline as direct uploads. Supports YouTube, Twitter, Vimeo, and ~1000
     other sites yt-dlp covers."""
@@ -248,9 +380,11 @@ def upload_url(payload: UrlUploadRequest):
     # Force the output to .mp4 so the rest of the pipeline (which assumes .mp4
     # for the censored-output path replacement) works without special-casing.
     out_template = os.path.join(UPLOAD_DIR, f"{timestamp}_{task_id}.%(ext)s")
+    # Cap at 720p — DETR/Whisper don't benefit from 1080p+ for moderation, and
+    # the smaller files dramatically reduce memory pressure on long videos.
     ydl_opts = {
         "outtmpl": out_template,
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        "format": "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/bv*[height<=720]+ba/b[height<=720]/b",
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
@@ -278,12 +412,16 @@ def upload_url(payload: UrlUploadRequest):
     relative_file_path = os.path.relpath(downloaded_path, _PROJECT_ROOT).replace("\\", "/")
     title = info.get("title") or os.path.basename(downloaded_path)
 
+    mode, duration = resolve_processing_mode(payload.processing_mode, downloaded_path)
     task = VideoProcessingTask(
         task_id=task_id,
         filename=title,
         file_path=relative_file_path,
         uploaded_at=datetime.now().isoformat(),
         status="pending",
+        processing_mode=mode,
+        duration_seconds=duration,
+        owner_username=user["sub"],
     )
 
     es = get_es_client()
@@ -299,12 +437,17 @@ def upload_url(payload: UrlUploadRequest):
         task_id=task_id,
         filename=title,
         status="queued",
-        message="Video downloaded and queued for processing",
+        message=f"Video downloaded and queued for processing (mode={mode})",
     )
 
 
 @app.post("/upload-video", response_model=VideoProcessingResponse)
-async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    processing_mode: str = Form("auto"),
+    user=Depends(require_user),
+):
     """
     Upload a video file for processing
 
@@ -334,10 +477,14 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
             content = await file.read()
             buffer.write(content)
 
+        mode, duration = resolve_processing_mode(processing_mode, file_path)
         task = VideoProcessingTask(
             task_id=task_id, filename=file.filename,
             file_path=relative_file_path, uploaded_at=datetime.now().isoformat(),
-            status="pending"
+            status="pending",
+            processing_mode=mode,
+            duration_seconds=duration,
+            owner_username=user["sub"],
         )
 
         # Create the ES document FIRST so workers can update its status the
