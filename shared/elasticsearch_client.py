@@ -70,7 +70,13 @@ class ElasticsearchClient:
                         "totp_secret": {"type": "keyword", "index": False},
                         "backup_codes_hashed": {"type": "keyword", "index": False},
                         "email": {"type": "keyword"},
+                        "email_otp_hash": {"type": "keyword", "index": False},
+                        "email_otp_expires": {"type": "date"},
+                        "email_otp_sent_at": {"type": "date"},
                         "pushover_user_key": {"type": "keyword", "index": False},
+                        "telegram_chat_id": {"type": "keyword"},
+                        "telegram_pairing_token": {"type": "keyword"},
+                        "pending_push": {"type": "object", "enabled": False},
                         "fido2_credentials": {"type": "object", "enabled": False},
                         "failed_logins": {"type": "integer"},
                         "locked_until": {"type": "date"},
@@ -252,6 +258,19 @@ class ElasticsearchClient:
             doc=fields,
             retry_on_conflict=3,
         )
+
+    def find_user_by(self, field: str, value: str):
+        """Return the first user whose `field` exactly equals `value`, or None.
+        Used by the Telegram poller to resolve a pairing token to a user."""
+        try:
+            res = self.client.search(
+                index=self.users_index,
+                body={"query": {"term": {field: value}}, "size": 1},
+            )
+            hits = res["hits"]["hits"]
+            return hits[0]["_source"] if hits else None
+        except Exception:
+            return None
 
     # ─────────────────────────────────────────────────────────────────
     # Auth audit log

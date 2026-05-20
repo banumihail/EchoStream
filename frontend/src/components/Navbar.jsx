@@ -49,6 +49,12 @@ const Navbar = ({ currentView, onNavigate, username, onLogout }) => {
           >
             Dossier
           </button>
+          <button
+            className={`nav-link ${currentView === 'security' ? 'active' : ''}`}
+            onClick={() => onNavigate('security')}
+          >
+            Security
+          </button>
           {username && (
             <>
               <span className="nav-user" title="Signed in as">{username}</span>

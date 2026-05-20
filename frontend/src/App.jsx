@@ -5,6 +5,7 @@ import UploadDashboard from './components/UploadDashboard';
 import AnalysisDashboard from './components/AnalysisDashboard';
 import TaskHistory from './components/TaskHistory';
 import Login from './components/Login';
+import Security from './components/Security';
 import { isTokenLikelyValid, getUsername, clearSession } from './lib/auth';
 
 function App() {
@@ -69,6 +70,9 @@ function App() {
         )}
         {currentView === 'history' && (
           <TaskHistory onSelectTask={handleSelectTask} />
+        )}
+        {currentView === 'security' && (
+          <Security />
         )}
       </div>
     </div>

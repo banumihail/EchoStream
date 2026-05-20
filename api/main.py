@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 import time
 import uvicorn
@@ -21,8 +21,17 @@ from shared.elasticsearch_client import ElasticsearchClient
 from shared.schemas import VideoProcessingTask, VideoProcessingResponse
 from shared.auth import (
     hash_password, verify_password,
-    create_access_token, require_user,
+    create_access_token, create_mfa_challenge_token,
+    require_user, require_mfa_challenge,
+    generate_backup_codes, hash_backup_code, consume_backup_code,
 )
+from shared.email_otp import (
+    generate_email_otp, hash_email_otp, otp_expiry_iso, now_iso,
+    verify_email_otp, seconds_until_resend_allowed, send_email_otp,
+    OTP_RESEND_SECONDS,
+)
+from shared import fido2 as fido2_lib
+from shared import telegram_push as tg
 from pydantic import BaseModel
 from fastapi import Request
 
@@ -202,19 +211,657 @@ def auth_login(payload: LoginRequest, request: Request):
                            "event_type": "login_fail", "mfa_method": "password",
                            "outcome": "denied", "reason": "bad credentials"})
         raise HTTPException(status_code=401, detail="Invalid username or password.")
-    # Phase 0: no MFA enforcement yet. If user has MFA methods, the token still
-    # issues but we'll switch to a two-step flow in Phase 1.
-    token = create_access_token({"sub": username, "mfa": bool(user.get("mfa_methods"))})
+
     es.log_auth_event({"username": username, "ip": ip,
                        "event_type": "login_success", "mfa_method": "password",
                        "outcome": "ok"})
+
+    methods = user.get("mfa_methods") or []
+    if methods:
+        # Two-step login — issue a short-lived challenge token. Caller must hit
+        # /auth/mfa/{method}/verify with it to obtain a real session JWT.
+        challenge = create_mfa_challenge_token(username, methods)
+        return {
+            "mfa_required": True,
+            "challenge_token": challenge,
+            "methods": methods,
+            "username": username,
+        }
+
+    # No MFA enrolled — issue a session JWT directly.
+    token = create_access_token({"sub": username, "mfa": False})
     return {"access_token": token, "token_type": "bearer", "username": username,
-            "mfa_methods": user.get("mfa_methods", [])}
+            "mfa_methods": []}
 
 
 @app.get("/auth/me")
 def auth_me(user=Depends(require_user)):
-    return {"username": user["sub"], "mfa_passed": user.get("mfa", False)}
+    es = get_es_client()
+    u = es.get_user(user["sub"]) or {}
+    return {
+        "username": user["sub"],
+        "mfa_passed": user.get("mfa", False),
+        "mfa_methods": u.get("mfa_methods", []),
+        "email": u.get("email"),
+        "backup_codes_remaining": len(u.get("backup_codes_hashed") or []),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────
+# MFA — TOTP (RFC 6238, Google Authenticator compatible)
+# ─────────────────────────────────────────────────────────────────
+class TotpConfirmRequest(BaseModel):
+    code: str
+
+
+class TotpVerifyRequest(BaseModel):
+    code: str
+
+
+def _qr_data_url_for(uri: str) -> str:
+    """Return a base64 data URL for a QR code rendering the given URI."""
+    import io, base64, qrcode
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+@app.post("/auth/mfa/totp/setup")
+def totp_setup(user=Depends(require_user)):
+    """Begin TOTP enrollment. Generates a new secret, stores it on the user
+    doc, and returns a QR code (PNG data URL) the user can scan with Google
+    Authenticator / Authy. TOTP is not active until /auth/mfa/totp/confirm
+    succeeds with the first 6-digit code."""
+    import pyotp
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username)
+    if u and "totp" in (u.get("mfa_methods") or []):
+        raise HTTPException(status_code=409, detail="TOTP is already enrolled.")
+    secret = pyotp.random_base32()
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name="EchoStream")
+    es.update_user(username, {"totp_secret": secret})
+    return {"secret": secret, "otpauth_uri": uri, "qr_data_url": _qr_data_url_for(uri)}
+
+
+@app.post("/auth/mfa/totp/confirm")
+def totp_confirm(payload: TotpConfirmRequest, request: Request,
+                 user=Depends(require_user)):
+    """Finalize TOTP enrollment by verifying the user's first code. Activates
+    TOTP by adding it to the user's mfa_methods list."""
+    import pyotp
+    es = get_es_client()
+    username = user["sub"]
+    ip = _client_ip(request)
+    u = es.get_user(username) or {}
+    secret = u.get("totp_secret")
+    if not secret:
+        raise HTTPException(status_code=400, detail="No TOTP setup in progress. Call /auth/mfa/totp/setup first.")
+    if not pyotp.TOTP(secret).verify(payload.code, valid_window=1):
+        es.log_auth_event({"username": username, "ip": ip,
+                           "event_type": "mfa_enroll_fail", "mfa_method": "totp",
+                           "outcome": "denied", "reason": "bad code"})
+        raise HTTPException(status_code=401, detail="Invalid TOTP code.")
+    methods = list(u.get("mfa_methods") or [])
+    if "totp" not in methods:
+        methods.append("totp")
+    es.update_user(username, {"mfa_methods": methods})
+    es.log_auth_event({"username": username, "ip": ip,
+                       "event_type": "mfa_enrolled", "mfa_method": "totp",
+                       "outcome": "ok"})
+    return {"ok": True, "mfa_methods": methods}
+
+
+@app.post("/auth/mfa/totp/verify")
+def totp_verify(payload: TotpVerifyRequest, request: Request,
+                challenge=Depends(require_mfa_challenge)):
+    """Complete the two-step login. Caller presents the MFA challenge token
+    obtained from /auth/login and a current TOTP code; returns a real session
+    JWT on success."""
+    import pyotp
+    es = get_es_client()
+    username = challenge["sub"]
+    ip = _client_ip(request)
+    u = es.get_user(username) or {}
+    secret = u.get("totp_secret")
+    if not secret or "totp" not in (u.get("mfa_methods") or []):
+        raise HTTPException(status_code=400, detail="TOTP is not enrolled for this user.")
+    if not pyotp.TOTP(secret).verify(payload.code, valid_window=1):
+        es.log_auth_event({"username": username, "ip": ip,
+                           "event_type": "mfa_fail", "mfa_method": "totp",
+                           "outcome": "denied", "reason": "bad code"})
+        raise HTTPException(status_code=401, detail="Invalid TOTP code.")
+    es.log_auth_event({"username": username, "ip": ip,
+                       "event_type": "mfa_success", "mfa_method": "totp",
+                       "outcome": "ok"})
+    token = create_access_token({"sub": username, "mfa": True})
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.post("/auth/mfa/totp/disable")
+def totp_disable(user=Depends(require_user)):
+    """Remove TOTP from the user's methods. The session must have completed
+    MFA — prevents an attacker who somehow gets a password-only session from
+    turning off the second factor."""
+    if not user.get("mfa"):
+        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to disable it.")
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    methods = [m for m in (u.get("mfa_methods") or []) if m != "totp"]
+    es.update_user(username, {"mfa_methods": methods, "totp_secret": None})
+    es.log_auth_event({"username": username, "event_type": "mfa_disabled",
+                       "mfa_method": "totp", "outcome": "ok"})
+    return {"ok": True, "mfa_methods": methods}
+
+
+# ─────────────────────────────────────────────────────────────────
+# MFA — Backup codes
+# ─────────────────────────────────────────────────────────────────
+class BackupVerifyRequest(BaseModel):
+    code: str
+
+
+@app.post("/auth/mfa/backup/generate")
+def backup_generate(request: Request, user=Depends(require_user)):
+    """(Re)generate a fresh set of 10 backup codes. Plaintext codes are
+    returned ONCE and never persisted server-side — only their HMAC-SHA256
+    hashes are stored. Calling this twice invalidates the previous set.
+
+    Generating requires that the session has already passed an MFA challenge
+    — backup codes are an account-recovery factor, not a way to escalate
+    from a single-factor session."""
+    if not user.get("mfa"):
+        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to manage backup codes.")
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    codes = generate_backup_codes()
+    hashed = [hash_backup_code(c) for c in codes]
+    methods = list(u.get("mfa_methods") or [])
+    if "backup" not in methods:
+        methods.append("backup")
+    es.update_user(username, {"backup_codes_hashed": hashed, "mfa_methods": methods})
+    es.log_auth_event({"username": username, "ip": _client_ip(request),
+                       "event_type": "mfa_enrolled", "mfa_method": "backup",
+                       "outcome": "ok", "reason": f"{len(codes)} codes generated"})
+    return {"codes": codes, "remaining": len(codes), "mfa_methods": methods}
+
+
+@app.post("/auth/mfa/backup/verify")
+def backup_verify(payload: BackupVerifyRequest, request: Request,
+                  challenge=Depends(require_mfa_challenge)):
+    """Complete the two-step login with a backup code. The matching hash is
+    removed on success (single-use). If the consumed code was the last one,
+    'backup' is automatically removed from mfa_methods."""
+    es = get_es_client()
+    username = challenge["sub"]
+    ip = _client_ip(request)
+    u = es.get_user(username) or {}
+    hashed = list(u.get("backup_codes_hashed") or [])
+    if not hashed or "backup" not in (u.get("mfa_methods") or []):
+        raise HTTPException(status_code=400, detail="Backup codes are not enrolled for this user.")
+    ok, remaining = consume_backup_code(payload.code, hashed)
+    if not ok:
+        es.log_auth_event({"username": username, "ip": ip,
+                           "event_type": "mfa_fail", "mfa_method": "backup",
+                           "outcome": "denied", "reason": "bad code"})
+        raise HTTPException(status_code=401, detail="Invalid backup code.")
+    update = {"backup_codes_hashed": remaining}
+    if not remaining:
+        methods = [m for m in (u.get("mfa_methods") or []) if m != "backup"]
+        update["mfa_methods"] = methods
+    es.update_user(username, update)
+    es.log_auth_event({"username": username, "ip": ip,
+                       "event_type": "mfa_success", "mfa_method": "backup",
+                       "outcome": "ok", "reason": f"{len(remaining)} codes remaining"})
+    token = create_access_token({"sub": username, "mfa": True})
+    return {"access_token": token, "token_type": "bearer", "username": username,
+            "remaining": len(remaining)}
+
+
+@app.post("/auth/mfa/backup/disable")
+def backup_disable(user=Depends(require_user)):
+    """Invalidate all backup codes and remove 'backup' from mfa_methods."""
+    if not user.get("mfa"):
+        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to disable it.")
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    methods = [m for m in (u.get("mfa_methods") or []) if m != "backup"]
+    es.update_user(username, {"backup_codes_hashed": [], "mfa_methods": methods})
+    es.log_auth_event({"username": username, "event_type": "mfa_disabled",
+                       "mfa_method": "backup", "outcome": "ok"})
+    return {"ok": True, "mfa_methods": methods}
+
+
+# ─────────────────────────────────────────────────────────────────
+# MFA — Email OTP
+# ─────────────────────────────────────────────────────────────────
+class EmailSetupRequest(BaseModel):
+    email: str | None = None  # optional override; otherwise uses email on file
+
+
+class EmailConfirmRequest(BaseModel):
+    code: str
+
+
+class EmailVerifyRequest(BaseModel):
+    code: str
+
+
+def _issue_email_otp(es, username: str, email: str, request: Request, audit_event: str):
+    """Common OTP-issue path. Stores hash + expiry + sent-at, sends the email
+    (or logs to console), returns the delivery channel. Throttled by
+    OTP_RESEND_SECONDS to prevent the challenge step from spamming the inbox."""
+    u = es.get_user(username) or {}
+    wait = seconds_until_resend_allowed(u.get("email_otp_sent_at"))
+    if wait > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {wait}s before requesting another code.",
+        )
+    code = generate_email_otp()
+    es.update_user(username, {
+        "email_otp_hash": hash_email_otp(code),
+        "email_otp_expires": otp_expiry_iso(),
+        "email_otp_sent_at": now_iso(),
+    })
+    try:
+        channel = send_email_otp(email, code)
+    except Exception as e:
+        # Don't leave a stale hash around if the send failed.
+        es.update_user(username, {"email_otp_hash": None, "email_otp_expires": None, "email_otp_sent_at": None})
+        es.log_auth_event({"username": username, "ip": _client_ip(request),
+                           "event_type": audit_event, "mfa_method": "email",
+                           "outcome": "denied", "reason": f"smtp error: {e}"})
+        raise HTTPException(status_code=502, detail="Could not send the email.")
+    es.log_auth_event({"username": username, "ip": _client_ip(request),
+                       "event_type": audit_event, "mfa_method": "email",
+                       "outcome": "ok", "reason": f"channel={channel} to={email}"})
+    return channel
+
+
+@app.post("/auth/mfa/email/setup")
+def email_mfa_setup(payload: EmailSetupRequest, request: Request, user=Depends(require_user)):
+    """Begin email-MFA enrollment. Optionally accepts a new email to associate
+    with the account. Sends a confirmation OTP; the user must POST the code
+    back to /auth/mfa/email/confirm to activate."""
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    email = (payload.email or u.get("email") or "").strip().lower()
+    if not email or "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="A valid email address is required.")
+    if "email" in (u.get("mfa_methods") or []):
+        raise HTTPException(status_code=409, detail="Email MFA is already enrolled.")
+    # Persist the email if it changed
+    if email != (u.get("email") or ""):
+        es.update_user(username, {"email": email})
+    channel = _issue_email_otp(es, username, email, request, "mfa_enroll_request")
+    return {"ok": True, "email": email, "channel": channel}
+
+
+@app.post("/auth/mfa/email/confirm")
+def email_mfa_confirm(payload: EmailConfirmRequest, request: Request, user=Depends(require_user)):
+    """Finalize email-MFA enrollment by verifying the OTP that was sent."""
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    ok, reason = verify_email_otp(payload.code, u.get("email_otp_hash"), u.get("email_otp_expires"))
+    if not ok:
+        es.log_auth_event({"username": username, "ip": _client_ip(request),
+                           "event_type": "mfa_enroll_fail", "mfa_method": "email",
+                           "outcome": "denied", "reason": reason})
+        raise HTTPException(status_code=401, detail="Invalid or expired code.")
+    methods = list(u.get("mfa_methods") or [])
+    if "email" not in methods:
+        methods.append("email")
+    es.update_user(username, {
+        "mfa_methods": methods,
+        "email_otp_hash": None, "email_otp_expires": None, "email_otp_sent_at": None,
+    })
+    es.log_auth_event({"username": username, "ip": _client_ip(request),
+                       "event_type": "mfa_enrolled", "mfa_method": "email",
+                       "outcome": "ok"})
+    return {"ok": True, "mfa_methods": methods}
+
+
+@app.post("/auth/mfa/email/request")
+def email_mfa_request(request: Request, challenge=Depends(require_mfa_challenge)):
+    """Login-flow: send a fresh OTP to the user's enrolled email address."""
+    es = get_es_client()
+    username = challenge["sub"]
+    u = es.get_user(username) or {}
+    if "email" not in (u.get("mfa_methods") or []):
+        raise HTTPException(status_code=400, detail="Email MFA is not enrolled for this user.")
+    email = (u.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="No email address on file.")
+    channel = _issue_email_otp(es, username, email, request, "mfa_otp_sent")
+    # Don't reveal the full address — partial masking for the UI hint.
+    name, _, domain = email.partition("@")
+    masked = f"{name[:2]}***@{domain}"
+    return {"ok": True, "channel": channel, "to": masked, "resend_in": OTP_RESEND_SECONDS}
+
+
+@app.post("/auth/mfa/email/verify")
+def email_mfa_verify(payload: EmailVerifyRequest, request: Request,
+                     challenge=Depends(require_mfa_challenge)):
+    """Complete the two-step login with an email OTP. The stored hash is
+    cleared on success (single-use)."""
+    es = get_es_client()
+    username = challenge["sub"]
+    u = es.get_user(username) or {}
+    if "email" not in (u.get("mfa_methods") or []):
+        raise HTTPException(status_code=400, detail="Email MFA is not enrolled for this user.")
+    ok, reason = verify_email_otp(payload.code, u.get("email_otp_hash"), u.get("email_otp_expires"))
+    if not ok:
+        es.log_auth_event({"username": username, "ip": _client_ip(request),
+                           "event_type": "mfa_fail", "mfa_method": "email",
+                           "outcome": "denied", "reason": reason})
+        raise HTTPException(status_code=401, detail="Invalid or expired code.")
+    # Single-use — wipe the hash so a leaked code can't be replayed.
+    es.update_user(username, {"email_otp_hash": None, "email_otp_expires": None, "email_otp_sent_at": None})
+    es.log_auth_event({"username": username, "ip": _client_ip(request),
+                       "event_type": "mfa_success", "mfa_method": "email",
+                       "outcome": "ok"})
+    token = create_access_token({"sub": username, "mfa": True})
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+# ─────────────────────────────────────────────────────────────────
+# MFA — FIDO2 / WebAuthn
+# ─────────────────────────────────────────────────────────────────
+class Fido2RegisterCompleteRequest(BaseModel):
+    challenge_token: str
+    attestation: dict
+    label: str | None = None
+
+
+class Fido2AuthCompleteRequest(BaseModel):
+    challenge_token: str
+    assertion: dict
+
+
+@app.post("/auth/mfa/fido2/register/begin")
+def fido2_register_begin(user=Depends(require_user)):
+    """Start a WebAuthn registration ceremony. Returns the
+    PublicKeyCredentialCreationOptions JSON the browser feeds to
+    navigator.credentials.create()."""
+    if not user.get("mfa"):
+        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to enroll a security key.")
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    existing = u.get("fido2_credentials") or []
+    options_json, challenge_token = fido2_lib.begin_registration(username, existing)
+    return {"options": options_json, "challenge_token": challenge_token}
+
+
+@app.post("/auth/mfa/fido2/register/complete")
+def fido2_register_complete(payload: Fido2RegisterCompleteRequest, request: Request,
+                            user=Depends(require_user)):
+    """Verify the attestation, persist the new credential, add 'fido2' to
+    the user's mfa_methods."""
+    if not user.get("mfa"):
+        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to enroll a security key.")
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    try:
+        cred = fido2_lib.complete_registration(username, payload.challenge_token, payload.attestation)
+    except ValueError as e:
+        es.log_auth_event({"username": username, "ip": _client_ip(request),
+                           "event_type": "mfa_enroll_fail", "mfa_method": "fido2",
+                           "outcome": "denied", "reason": str(e)})
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        es.log_auth_event({"username": username, "ip": _client_ip(request),
+                           "event_type": "mfa_enroll_fail", "mfa_method": "fido2",
+                           "outcome": "denied", "reason": f"verify error: {e}"})
+        raise HTTPException(status_code=400, detail="Registration verification failed.")
+    cred["label"] = (payload.label or "Security key").strip()[:64]
+    credentials = list(u.get("fido2_credentials") or [])
+    credentials.append(cred)
+    methods = list(u.get("mfa_methods") or [])
+    if "fido2" not in methods:
+        methods.append("fido2")
+    es.update_user(username, {"fido2_credentials": credentials, "mfa_methods": methods})
+    es.log_auth_event({"username": username, "ip": _client_ip(request),
+                       "event_type": "mfa_enrolled", "mfa_method": "fido2",
+                       "outcome": "ok", "reason": f"label={cred['label']}"})
+    # Don't return public_key bytes to the browser — minimize surface.
+    return {"ok": True, "mfa_methods": methods,
+            "credential": {"label": cred["label"], "created_at": cred["created_at"]}}
+
+
+@app.post("/auth/mfa/fido2/auth/begin")
+def fido2_auth_begin(challenge=Depends(require_mfa_challenge)):
+    """Start an authentication ceremony for the user identified by the MFA
+    challenge token. Returns PublicKeyCredentialRequestOptions JSON."""
+    es = get_es_client()
+    username = challenge["sub"]
+    u = es.get_user(username) or {}
+    creds = u.get("fido2_credentials") or []
+    if "fido2" not in (u.get("mfa_methods") or []) or not creds:
+        raise HTTPException(status_code=400, detail="FIDO2 is not enrolled for this user.")
+    try:
+        options_json, token = fido2_lib.begin_authentication(username, creds)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"options": options_json, "challenge_token": token}
+
+
+@app.post("/auth/mfa/fido2/auth/complete")
+def fido2_auth_complete(payload: Fido2AuthCompleteRequest, request: Request,
+                        challenge=Depends(require_mfa_challenge)):
+    """Verify the signed assertion, bump the sign_count, issue a session JWT."""
+    es = get_es_client()
+    username = challenge["sub"]
+    u = es.get_user(username) or {}
+    creds = list(u.get("fido2_credentials") or [])
+    try:
+        updated = fido2_lib.complete_authentication(
+            username, payload.challenge_token, payload.assertion, creds,
+        )
+    except ValueError as e:
+        es.log_auth_event({"username": username, "ip": _client_ip(request),
+                           "event_type": "mfa_fail", "mfa_method": "fido2",
+                           "outcome": "denied", "reason": str(e)})
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        es.log_auth_event({"username": username, "ip": _client_ip(request),
+                           "event_type": "mfa_fail", "mfa_method": "fido2",
+                           "outcome": "denied", "reason": f"verify error: {e}"})
+        raise HTTPException(status_code=401, detail="FIDO2 verification failed.")
+    # Persist the bumped sign_count back into the right credential slot.
+    new_creds = []
+    for c in creds:
+        if c["credential_id"] == updated["credential_id"]:
+            new_creds.append(updated)
+        else:
+            new_creds.append(c)
+    es.update_user(username, {"fido2_credentials": new_creds})
+    es.log_auth_event({"username": username, "ip": _client_ip(request),
+                       "event_type": "mfa_success", "mfa_method": "fido2",
+                       "outcome": "ok", "reason": f"label={updated.get('label')}"})
+    token = create_access_token({"sub": username, "mfa": True})
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.get("/auth/mfa/fido2/credentials")
+def fido2_list_credentials(user=Depends(require_user)):
+    """Return the labels + timestamps of the user's enrolled credentials,
+    without the public-key bytes."""
+    es = get_es_client()
+    u = es.get_user(user["sub"]) or {}
+    creds = u.get("fido2_credentials") or []
+    return [
+        {"credential_id": c["credential_id"], "label": c.get("label"),
+         "created_at": c.get("created_at"), "last_used_at": c.get("last_used_at")}
+        for c in creds
+    ]
+
+
+@app.delete("/auth/mfa/fido2/credentials/{credential_id}")
+def fido2_delete_credential(credential_id: str, user=Depends(require_user)):
+    """Remove a specific FIDO2 credential. If it's the last one, 'fido2' is
+    removed from mfa_methods automatically."""
+    if not user.get("mfa"):
+        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to manage security keys.")
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    creds = u.get("fido2_credentials") or []
+    new_creds = [c for c in creds if c["credential_id"] != credential_id]
+    if len(new_creds) == len(creds):
+        raise HTTPException(status_code=404, detail="Credential not found.")
+    update = {"fido2_credentials": new_creds}
+    if not new_creds:
+        methods = [m for m in (u.get("mfa_methods") or []) if m != "fido2"]
+        update["mfa_methods"] = methods
+    es.update_user(username, update)
+    es.log_auth_event({"username": username, "event_type": "mfa_credential_removed",
+                       "mfa_method": "fido2", "outcome": "ok"})
+    return {"ok": True, "remaining": len(new_creds)}
+
+
+@app.post("/auth/mfa/email/disable")
+def email_mfa_disable(user=Depends(require_user)):
+    """Remove 'email' from mfa_methods and clear any pending OTP."""
+    if not user.get("mfa"):
+        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to disable it.")
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    methods = [m for m in (u.get("mfa_methods") or []) if m != "email"]
+    es.update_user(username, {
+        "mfa_methods": methods,
+        "email_otp_hash": None, "email_otp_expires": None, "email_otp_sent_at": None,
+    })
+    es.log_auth_event({"username": username, "event_type": "mfa_disabled",
+                       "mfa_method": "email", "outcome": "ok"})
+    return {"ok": True, "mfa_methods": methods}
+
+
+# ─────────────────────────────────────────────────────────────────
+# MFA — Push notification (Telegram bot, Approve/Deny)
+# ─────────────────────────────────────────────────────────────────
+PUSH_REQUEST_TTL_SECONDS = 120
+
+
+@app.post("/auth/mfa/push/enroll/begin")
+def push_enroll_begin(user=Depends(require_user)):
+    """Generate a one-time pairing token and return a deep link to the bot.
+    The user opens it in Telegram and taps Start; the poller links their
+    chat_id. Requires an MFA-passed session."""
+    if not user.get("mfa"):
+        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to connect push.")
+    if not tg.is_configured():
+        raise HTTPException(status_code=503, detail="Push is not configured on the server (TELEGRAM_BOT_TOKEN missing).")
+    es = get_es_client()
+    username = user["sub"]
+    pairing_token = uuid.uuid4().hex
+    es.update_user(username, {"telegram_pairing_token": pairing_token})
+    try:
+        bot = tg.get_me()
+        bot_username = bot.get("username")
+    except Exception:
+        raise HTTPException(status_code=502, detail="Could not reach Telegram.")
+    deep_link = f"https://t.me/{bot_username}?start={pairing_token}"
+    return {"deep_link": deep_link, "bot_username": bot_username}
+
+
+@app.get("/auth/mfa/push/enroll/status")
+def push_enroll_status(user=Depends(require_user)):
+    """Polled by the Security page; reports whether pairing has completed."""
+    es = get_es_client()
+    u = es.get_user(user["sub"]) or {}
+    enrolled = "push" in (u.get("mfa_methods") or []) and bool(u.get("telegram_chat_id"))
+    return {"enrolled": enrolled}
+
+
+@app.post("/auth/mfa/push/request")
+def push_request(request: Request, challenge=Depends(require_mfa_challenge)):
+    """Login-flow: create a pending request and send the Approve/Deny prompt
+    to the user's Telegram."""
+    es = get_es_client()
+    username = challenge["sub"]
+    u = es.get_user(username) or {}
+    chat_id = u.get("telegram_chat_id")
+    if "push" not in (u.get("mfa_methods") or []) or not chat_id:
+        raise HTTPException(status_code=400, detail="Push is not enrolled for this user.")
+    request_id = uuid.uuid4().hex[:12]
+    expires = (datetime.now(timezone.utc) + timedelta(seconds=PUSH_REQUEST_TTL_SECONDS)).isoformat()
+    es.update_user(username, {"pending_push": {
+        "request_id": request_id, "status": "pending", "expires": expires,
+        "created": datetime.now(timezone.utc).isoformat(),
+    }})
+    ip = _client_ip(request)
+    text = (f"EchoStream sign-in request\n\nUser: {username}\nIP: {ip}\n\n"
+            f"Approve only if this is you. Expires in {PUSH_REQUEST_TTL_SECONDS // 60} min.")
+    try:
+        tg.send_approval_request(chat_id, text, request_id, username)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not send push: {e}")
+    es.log_auth_event({"username": username, "ip": ip, "event_type": "push_sent",
+                       "mfa_method": "push", "outcome": "ok"})
+    return {"ok": True, "request_id": request_id, "expires_in": PUSH_REQUEST_TTL_SECONDS}
+
+
+@app.get("/auth/mfa/push/status")
+def push_status(challenge=Depends(require_mfa_challenge)):
+    """Polled by the login screen. Returns pending | approved | denied | expired | none."""
+    es = get_es_client()
+    u = es.get_user(challenge["sub"]) or {}
+    pending = u.get("pending_push") or {}
+    status = pending.get("status", "none")
+    # Lazily mark expiry so the UI doesn't hang on a never-answered request.
+    if status == "pending":
+        try:
+            if datetime.now(timezone.utc) > datetime.fromisoformat(pending["expires"]):
+                status = "expired"
+        except (KeyError, ValueError):
+            pass
+    return {"status": status}
+
+
+@app.post("/auth/mfa/push/verify")
+def push_verify(request: Request, challenge=Depends(require_mfa_challenge)):
+    """Issue a session JWT iff the pending request was approved. Clears the
+    pending request so it can't be replayed."""
+    es = get_es_client()
+    username = challenge["sub"]
+    u = es.get_user(username) or {}
+    pending = u.get("pending_push") or {}
+    if pending.get("status") != "approved":
+        raise HTTPException(status_code=401, detail="Push not approved.")
+    # Single-use: clear the pending request.
+    es.update_user(username, {"pending_push": None})
+    es.log_auth_event({"username": username, "ip": _client_ip(request),
+                       "event_type": "mfa_success", "mfa_method": "push", "outcome": "ok"})
+    token = create_access_token({"sub": username, "mfa": True})
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.post("/auth/mfa/push/disable")
+def push_disable(user=Depends(require_user)):
+    """Unlink Telegram and remove 'push' from mfa_methods."""
+    if not user.get("mfa"):
+        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to disable it.")
+    es = get_es_client()
+    username = user["sub"]
+    u = es.get_user(username) or {}
+    methods = [m for m in (u.get("mfa_methods") or []) if m != "push"]
+    es.update_user(username, {
+        "mfa_methods": methods,
+        "telegram_chat_id": None, "telegram_pairing_token": None, "pending_push": None,
+    })
+    es.log_auth_event({"username": username, "event_type": "mfa_disabled",
+                       "mfa_method": "push", "outcome": "ok"})
+    return {"ok": True, "mfa_methods": methods}
 
 
 @app.get("/")
