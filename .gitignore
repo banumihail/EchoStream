@@ -29,3 +29,6 @@ install_ffmpeg.py
 # Local-only / debug
 .claude/
 scratch/
+
+# TLS certs / private keys (generate locally via tools/gen_cert.py)
+certs/

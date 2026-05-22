@@ -1250,4 +1250,13 @@ def shutdown_event():
 if __name__ == "__main__":
     host = os.getenv("API_HOST", "0.0.0.0")
     port = int(os.getenv("API_PORT", "8000"))
-    uvicorn.run(app, host=host, port=port)
+    # Serve over HTTPS if a cert pair is present (generate via tools/gen_cert.py).
+    # Falls back to plain HTTP so the app still runs without certs.
+    cert_path = os.path.join(_PROJECT_ROOT, "certs", "localhost-cert.pem")
+    key_path = os.path.join(_PROJECT_ROOT, "certs", "localhost-key.pem")
+    if os.getenv("API_HTTPS", "1") == "1" and os.path.exists(cert_path) and os.path.exists(key_path):
+        print(f"[API] HTTPS enabled (cert: {cert_path})")
+        uvicorn.run(app, host=host, port=port, ssl_certfile=cert_path, ssl_keyfile=key_path)
+    else:
+        print("[API] HTTPS disabled — serving plain HTTP")
+        uvicorn.run(app, host=host, port=port)
