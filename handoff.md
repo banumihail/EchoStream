@@ -13,7 +13,16 @@
 ## Current state of the code
 
 ### Last commit
-`b808ce7` on `origin/master`. Repo: https://github.com/banumihail/EchoStream
+`73386b1` on `origin/master`. Repo: https://github.com/banumihail/EchoStream
+
+### Digital Security project status
+Both required deliverables are **complete**:
+- ✅ 5 MFA methods (Phase 1 TOTP, Phase 2 backup codes, Phase 3 email OTP via Mailtrap, Phase 4 FIDO2/WebAuthn, Phase 5 Telegram push)
+- ✅ Unauthorized-access notification module (Phase 6 lockout + IP throttle, Phase 7 security_alerter → Telegram)
+
+Remaining: **Phase 8** (HTTPS self-signed, optional polish) and the **security report** (Word, Romanian, worth 2.0/6.0 — scaffolded in `digitalsecurityproj.md`).
+
+Demo accounts: `mihail` / `12345678` has all 5 MFA methods enrolled. `.env` holds the live Mailtrap + Telegram-bot secrets (gitignored).
 
 ### What's running
 - **Docker:** RabbitMQ + Elasticsearch + Kibana (all 3 echostream_* containers)
@@ -86,12 +95,16 @@ After TOTP works end-to-end, Phases 2-7 follow the same pattern (different verif
 ```powershell
 $root='d:\LICENTA\EchoStream'; $py = "$root\.venv\Scripts\python.exe"
 docker start echostream_rabbitmq echostream_elasticsearch echostream_kibana
-Start-Sleep 12
-foreach ($w in 'asr','ner','audio_event','vision','censor') {
-  Start-Process $py -ArgumentList "$root\workers\${w}_worker.py" -WorkingDirectory "$root\workers" -RedirectStandardOutput "$root\scratch\${w}_stdout.log" -RedirectStandardError "$root\scratch\${w}_stderr.log" -WindowStyle Hidden
+Start-Sleep 14   # wait for Elasticsearch — the poller/alerter crash if ES isn't reachable yet
+# 5 ML workers + telegram_poller (push MFA) + security_alerter (Phase 7 alerts)
+foreach ($w in 'asr_worker','ner_worker','audio_event_worker','vision_worker','censor_worker','telegram_poller','security_alerter') {
+  Start-Process $py -ArgumentList "$root\workers\${w}.py" -WorkingDirectory "$root\workers" -RedirectStandardOutput "$root\scratch\${w}_stdout.log" -RedirectStandardError "$root\scratch\${w}_stderr.log" -WindowStyle Hidden
 }
 Start-Process $py -ArgumentList "$root\api\main.py" -WorkingDirectory $root -RedirectStandardOutput "$root\scratch\api_stdout.log" -RedirectStandardError "$root\scratch\api_stderr.log" -WindowStyle Hidden
 Start-Process 'npm.cmd' -ArgumentList 'run','dev' -WorkingDirectory "$root\frontend" -RedirectStandardOutput "$root\scratch\frontend_stdout.log" -RedirectStandardError "$root\scratch\frontend_stderr.log" -WindowStyle Hidden
 ```
 
-Test login as `testuser` / `testpass123` (or register fresh).
+Verify the two easy-to-miss background processes are real python.exe procs (not just log files):
+`Get-CimInstance Win32_Process | ? { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'telegram_poller|security_alerter' }`
+
+Demo login: `mihail` / `12345678` (TOTP + backup + email + FIDO2 + push all enrolled).
