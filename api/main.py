@@ -171,6 +171,46 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "0.0.0.0"
 
 
+# ── Brute-force protection ────────────────────────────────────────
+# Per-account lockout: N consecutive password failures locks the account for
+# a cooldown. Per-IP throttle: a sliding window caps login attempts from one
+# source to slow distributed / username-enumeration attacks.
+LOCKOUT_THRESHOLD = int(os.getenv("LOCKOUT_THRESHOLD", "5"))
+LOCKOUT_MINUTES = int(os.getenv("LOCKOUT_MINUTES", "15"))
+IP_RATE_LIMIT = int(os.getenv("LOGIN_IP_RATE_LIMIT", "10"))
+IP_RATE_WINDOW_SECONDS = int(os.getenv("LOGIN_IP_RATE_WINDOW", "60"))
+
+from collections import defaultdict, deque
+_login_attempts_by_ip: dict[str, deque] = defaultdict(deque)
+
+
+def _ip_rate_exceeded(ip: str) -> bool:
+    """Sliding-window per-IP rate check for the login endpoint. In-memory
+    (single API process); a distributed deployment would back this with Redis."""
+    now = time.time()
+    dq = _login_attempts_by_ip[ip]
+    cutoff = now - IP_RATE_WINDOW_SECONDS
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+    if len(dq) >= IP_RATE_LIMIT:
+        return True
+    dq.append(now)
+    return False
+
+
+def _account_locked_remaining(user: dict) -> int:
+    """Seconds remaining on an account lock, or 0 if not locked."""
+    locked_until = user.get("locked_until")
+    if not locked_until:
+        return 0
+    try:
+        lu = datetime.fromisoformat(locked_until)
+    except ValueError:
+        return 0
+    remaining = (lu - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(remaining))
+
+
 @app.post("/auth/register")
 def auth_register(payload: RegisterRequest, request: Request):
     es = get_es_client()
@@ -205,12 +245,52 @@ def auth_login(payload: LoginRequest, request: Request):
     es = get_es_client()
     username = payload.username.strip().lower()
     ip = _client_ip(request)
+
+    # 1) Per-IP throttle — runs before any DB work so it also absorbs
+    #    username-spray against non-existent accounts.
+    if _ip_rate_exceeded(ip):
+        es.log_auth_event({"username": username, "ip": ip,
+                           "event_type": "rate_limited", "mfa_method": "password",
+                           "outcome": "denied", "reason": "ip rate limit"})
+        raise HTTPException(status_code=429, detail="Too many attempts. Slow down and try again shortly.")
+
     user = es.get_user(username)
+
+    # 2) Account lockout — a locked account stays locked regardless of whether
+    #    the password is now correct.
+    if user:
+        remaining = _account_locked_remaining(user)
+        if remaining > 0:
+            es.log_auth_event({"username": username, "ip": ip,
+                               "event_type": "lockout_block", "mfa_method": "password",
+                               "outcome": "locked", "reason": f"{remaining}s remaining"})
+            raise HTTPException(status_code=429,
+                                detail=f"Account temporarily locked. Try again in {remaining // 60 + 1} min.")
+
+    # 3) Password check
     if not user or not verify_password(payload.password, user["password_hash"]):
+        if user:
+            fails = (user.get("failed_logins") or 0) + 1
+            update = {"failed_logins": fails}
+            if fails >= LOCKOUT_THRESHOLD:
+                update["locked_until"] = (datetime.now(timezone.utc) + timedelta(minutes=LOCKOUT_MINUTES)).isoformat()
+                update["failed_logins"] = 0  # reset counter once locked
+                es.update_user(username, update)
+                es.log_auth_event({"username": username, "ip": ip,
+                                   "event_type": "lockout", "mfa_method": "password",
+                                   "outcome": "locked",
+                                   "reason": f"{LOCKOUT_THRESHOLD} consecutive failures"})
+                raise HTTPException(status_code=429,
+                                    detail=f"Too many failed attempts. Account locked for {LOCKOUT_MINUTES} min.")
+            es.update_user(username, update)
         es.log_auth_event({"username": username, "ip": ip,
                            "event_type": "login_fail", "mfa_method": "password",
                            "outcome": "denied", "reason": "bad credentials"})
         raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    # 4) Success — reset the failure counter / clear any stale lock.
+    if user.get("failed_logins") or user.get("locked_until"):
+        es.update_user(username, {"failed_logins": 0, "locked_until": None})
 
     es.log_auth_event({"username": username, "ip": ip,
                        "event_type": "login_success", "mfa_method": "password",
