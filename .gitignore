@@ -22,8 +22,8 @@ models_cache/
 # Pip cache (redirected to D:)
 .pip_cache/
 
-# Test files
-test_*.py
+# Ad-hoc test/scratch scripts at repo root (real unit tests in subdirs are tracked)
+/test_*.py
 install_ffmpeg.py
 
 # Local-only / debug
