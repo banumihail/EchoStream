@@ -10,6 +10,7 @@ import os, sys, cv2, torch
 from transformers import pipeline
 from PIL import Image
 from base_worker import BaseWorker
+from detection_utils import dedupe_frame, peak_label_counts
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.elasticsearch_client import ElasticsearchClient
@@ -62,6 +63,7 @@ class VisionWorker(BaseWorker):
         if max(src_w, src_h) > MAX_DIM:
             scale = MAX_DIM / max(src_w, src_h)
         all_objects = []
+        frames = []  # one entry per sampled frame: its de-duplicated detections
         frame_idx = 0
         seek_step = frame_interval  # use grab() to skip cheaply between samples
         while frame_idx < total_frames:
@@ -80,8 +82,11 @@ class VisionWorker(BaseWorker):
             pil_image = Image.fromarray(rgb_frame)
             results = self.vision_classifier(pil_image)
             inv = 1.0 / scale if scale != 0 else 1.0
-            for res in results:
-                if res['score'] < 0.8: continue
+            # Keep confident boxes, then drop duplicate boxes DETR sometimes
+            # emits for the same object within this single frame.
+            frame_dets = dedupe_frame([r for r in results if r['score'] >= 0.8])
+            frames.append(frame_dets)
+            for res in frame_dets:
                 box = res["box"]
                 all_objects.append({
                     "timestamp": round(current_time, 2),
@@ -95,11 +100,9 @@ class VisionWorker(BaseWorker):
                 torch.cuda.empty_cache()
             frame_idx += 1
         cap.release()
-        label_counts = {}
-        for obj in all_objects:
-            lbl = obj["label"]
-            label_counts[lbl] = label_counts.get(lbl, 0) + 1
-        summary = [{"label": l, "count": c} for l, c in label_counts.items()]
+        # Report the peak simultaneous count per label (max in any single
+        # frame), not the sum of detections across all sampled frames.
+        summary = [{"label": l, "count": c} for l, c in peak_label_counts(frames).items()]
         print(f"  Found objects: {[s['label'] for s in summary]}")
         return {"objects_timeline": all_objects, "summary": summary}
 
