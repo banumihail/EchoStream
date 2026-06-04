@@ -32,3 +32,5 @@ scratch/
 
 # TLS certs / private keys (generate locally via tools/gen_cert.py)
 certs/
+# Visual companion (brainstorming) scratch
+.superpowers/
