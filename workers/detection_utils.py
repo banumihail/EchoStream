@@ -48,3 +48,22 @@ def dedupe_frame(detections, iou_threshold: float = 0.6):
             continue
         kept.append(det)
     return kept
+
+
+def peak_label_counts(frames) -> dict:
+    """Peak simultaneous count of each label across sampled frames.
+
+    frames: list of per-frame detection lists (each detection a dict with
+    "label"). Returns {label: max number seen in any single frame} — the
+    intuitive "how many are in this video", versus the old behaviour of
+    summing detections across every sampled frame.
+    """
+    peak = {}
+    for frame in frames:
+        counts = {}
+        for det in frame:
+            counts[det["label"]] = counts.get(det["label"], 0) + 1
+        for label, c in counts.items():
+            if c > peak.get(label, 0):
+                peak[label] = c
+    return peak

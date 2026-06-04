@@ -3,7 +3,7 @@ Unit tests for workers/detection_utils.py — pure functions, no GPU/model/video
 Run from repo root: .venv/Scripts/python.exe workers/test_detection_utils.py
 Plain-script style to match the repo's existing tests; no pytest needed.
 """
-from detection_utils import iou, dedupe_frame  # peak_label_counts added in Task 3
+from detection_utils import iou, dedupe_frame, peak_label_counts
 
 
 def _box(xmin, ymin, xmax, ymax):
@@ -58,6 +58,27 @@ def test_dedupe_never_merges_across_labels():
 
 def test_dedupe_empty():
     assert dedupe_frame([], 0.6) == []
+
+
+def test_peak_counts_uses_max_not_sum():
+    # The exact bug: 2 people in each of 2 sampled frames was reported as 4.
+    frames = [
+        [{"label": "person"}, {"label": "person"}],
+        [{"label": "person"}, {"label": "person"}],
+    ]
+    assert peak_label_counts(frames) == {"person": 2}
+
+
+def test_peak_counts_multi_label():
+    frames = [
+        [{"label": "person"}, {"label": "car"}],
+        [{"label": "person"}, {"label": "person"}, {"label": "car"}],
+    ]
+    assert peak_label_counts(frames) == {"person": 2, "car": 1}
+
+
+def test_peak_counts_empty():
+    assert peak_label_counts([]) == {}
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
