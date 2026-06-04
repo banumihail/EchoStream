@@ -3,7 +3,7 @@ Unit tests for workers/detection_utils.py — pure functions, no GPU/model/video
 Run from repo root: .venv/Scripts/python.exe workers/test_detection_utils.py
 Plain-script style to match the repo's existing tests; no pytest needed.
 """
-from detection_utils import iou  # dedupe_frame, peak_label_counts added in later tasks
+from detection_utils import iou, dedupe_frame  # peak_label_counts added in Task 3
 
 
 def _box(xmin, ymin, xmax, ymax):
@@ -28,6 +28,36 @@ def test_iou_partial_overlap():
 
 def test_iou_degenerate_zero_area():
     assert iou(_box(5, 5, 5, 5), _box(0, 0, 10, 10)) == 0.0
+
+
+def test_dedupe_merges_overlapping_same_label():
+    dets = [
+        {"label": "person", "score": 0.95, "box": _box(0, 0, 10, 10)},
+        {"label": "person", "score": 0.88, "box": _box(1, 1, 11, 11)},  # iou ~0.68
+    ]
+    kept = dedupe_frame(dets, 0.6)
+    assert len(kept) == 1
+    assert kept[0]["score"] == 0.95  # the higher-score box survives
+
+
+def test_dedupe_keeps_distinct_same_label():
+    dets = [
+        {"label": "person", "score": 0.95, "box": _box(0, 0, 10, 10)},
+        {"label": "person", "score": 0.90, "box": _box(40, 40, 50, 50)},  # no overlap
+    ]
+    assert len(dedupe_frame(dets, 0.6)) == 2  # two real people
+
+
+def test_dedupe_never_merges_across_labels():
+    dets = [
+        {"label": "person", "score": 0.95, "box": _box(0, 0, 10, 10)},
+        {"label": "tie", "score": 0.90, "box": _box(1, 1, 11, 11)},  # overlaps, diff label
+    ]
+    assert len(dedupe_frame(dets, 0.6)) == 2
+
+
+def test_dedupe_empty():
+    assert dedupe_frame([], 0.6) == []
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
