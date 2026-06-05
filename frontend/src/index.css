@@ -1573,3 +1573,64 @@ body::before {
 
 /* keep the App.css minimal-default working */
 .App { width: 100%; }
+
+/* ===================================================================== */
+/*                       LANDING + AUTH MODAL                            */
+/* ===================================================================== */
+
+.landing { min-height: 100vh; display: flex; flex-direction: column; }
+.landing-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 40px; border-bottom: 1px solid var(--rule);
+}
+.landing-nav-actions { display: flex; align-items: center; gap: 14px; }
+
+.landing-hero { max-width: 1180px; margin: 0 auto; width: 100%; padding: 64px 40px 28px; }
+.landing-eyebrow {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--bone-dim); margin-bottom: 18px;
+}
+.landing-title {
+  font-family: var(--serif); font-weight: 500; letter-spacing: -0.02em;
+  font-size: clamp(34px, 5vw, 56px); line-height: 1.03; max-width: 16ch; color: var(--bone);
+}
+.landing-sub { color: var(--bone-2); font-size: 16px; line-height: 1.55; max-width: 52ch; margin-top: 18px; }
+
+.landing-tiles {
+  max-width: 1180px; margin: 0 auto; width: 100%; padding: 24px 40px 56px;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+}
+@media (max-width: 860px) { .landing-tiles { grid-template-columns: repeat(2, 1fr); } }
+.landing-tile { background: var(--ink-2); border: 1px solid var(--rule); padding: 20px; transition: border-color var(--t-fast); }
+.landing-tile:hover { border-color: var(--rule-bright); }
+.landing-tile .tile-ic { color: var(--acid); margin-bottom: 12px; }
+.landing-tile h4 { font-size: 14px; font-weight: 600; color: var(--bone); margin-bottom: 5px; }
+.landing-tile p { font-size: 12.5px; color: var(--bone-dim); line-height: 1.5; }
+
+.landing-models {
+  max-width: 1180px; margin: 0 auto; width: 100%; padding: 0 40px 48px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em; color: var(--bone-faint);
+}
+
+/* Auth modal */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(5, 5, 5, 0.72);
+  backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  animation: fade-in var(--t-base);
+}
+.modal-card {
+  position: relative; width: 100%; max-width: 420px;
+  background: var(--ink-2); border: 1px solid var(--rule-bright);
+  padding: 28px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+.modal-close {
+  position: absolute; top: 14px; right: 14px;
+  background: transparent; border: none; color: var(--bone-dim); cursor: pointer;
+  padding: 4px; line-height: 0; transition: color var(--t-fast);
+}
+.modal-close:hover { color: var(--bone); }
+.modal-title { font-family: var(--serif); font-size: 28px; font-weight: 400; color: var(--bone); letter-spacing: -0.01em; }
+.modal-title em { font-style: italic; font-weight: 300; color: var(--acid); }
+.modal-subtitle { color: var(--bone-dim); font-size: 13px; margin: 4px 0 20px; }
