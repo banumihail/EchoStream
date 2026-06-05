@@ -1,6 +1,6 @@
 import React from 'react';
 import Icon from './Icon';
-import CasePreview from './CasePreview';
+import TranscriptScan from './TranscriptScan';
 
 const TILES = [
   { icon: 'transcript', title: 'Word-level transcript', body: 'Clickable, searchable, time-synced to the video.' },
@@ -23,8 +23,8 @@ export default function LandingPage({ onSignIn, onGetStarted }) {
             <span
               key={i}
               style={{
-                animationDelay: `${(i % 7) * 0.12 + (i % 3) * 0.05}s`,
-                animationDuration: `${1.1 + (i % 5) * 0.18}s`,
+                animationDelay: `${(i % 7) * 0.18 + (i % 3) * 0.08}s`,
+                animationDuration: `${2.8 + (i % 5) * 0.45}s`,
               }}
             />
           ))}
@@ -51,7 +51,7 @@ export default function LandingPage({ onSignIn, onGetStarted }) {
           </p>
         </div>
         <div className="landing-hero-visual lm-r lm-d4">
-          <CasePreview />
+          <TranscriptScan />
         </div>
       </header>
 
