@@ -34,3 +34,4 @@ scratch/
 certs/
 # Visual companion (brainstorming) scratch
 .superpowers/
+.playwright-mcp/

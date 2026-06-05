@@ -4,14 +4,16 @@ import Navbar from './components/Navbar';
 import UploadDashboard from './components/UploadDashboard';
 import AnalysisDashboard from './components/AnalysisDashboard';
 import TaskHistory from './components/TaskHistory';
-import Login from './components/Login';
+import LandingPage from './components/LandingPage';
+import AuthModal from './components/AuthModal';
 import Security from './components/Security';
 import { isTokenLikelyValid, getUsername, clearSession } from './lib/auth';
 
 function App() {
   const [authedUser, setAuthedUser] = useState(() => (isTokenLikelyValid() ? getUsername() : null));
-  const [currentView, setCurrentView] = useState('upload'); // 'upload' | 'analysis' | 'history'
+  const [currentView, setCurrentView] = useState('upload'); // 'upload' | 'analysis' | 'history' | 'security'
   const [taskId, setTaskId] = useState(null);
+  const [authModal, setAuthModal] = useState(null); // null | 'login' | 'register'
 
   useEffect(() => {
     const onExpired = () => setAuthedUser(null);
@@ -26,34 +28,25 @@ function App() {
     setCurrentView('upload');
   };
 
-  const handleUploadSuccess = (id) => {
-    setTaskId(id);
-    setCurrentView('analysis');
-  };
-
-  const handleSelectTask = (id) => {
-    setTaskId(id);
-    setCurrentView('analysis');
-  };
-
-  const handleReset = () => {
-    setTaskId(null);
-    setCurrentView('upload');
-  };
-
+  const handleUploadSuccess = (id) => { setTaskId(id); setCurrentView('analysis'); };
+  const handleSelectTask = (id) => { setTaskId(id); setCurrentView('analysis'); };
+  const handleReset = () => { setTaskId(null); setCurrentView('upload'); };
   const handleNavigate = (view) => {
-    if (view === 'upload') {
-      setTaskId(null);
-    }
+    if (view === 'upload') setTaskId(null);
     setCurrentView(view);
   };
 
   if (!authedUser) {
     return (
       <div className="app-shell">
-        <div className="page-content">
-          <Login onLoggedIn={(u) => setAuthedUser(u)} />
-        </div>
+        <LandingPage onSignIn={() => setAuthModal('login')} onGetStarted={() => setAuthModal('register')} />
+        {authModal && (
+          <AuthModal
+            initialMode={authModal}
+            onClose={() => setAuthModal(null)}
+            onLoggedIn={(u) => { setAuthModal(null); setAuthedUser(u); }}
+          />
+        )}
       </div>
     );
   }
@@ -62,18 +55,10 @@ function App() {
     <div className="app-shell">
       <Navbar currentView={currentView} onNavigate={handleNavigate} username={authedUser} onLogout={handleLogout} />
       <div className="page-content">
-        {currentView === 'upload' && (
-          <UploadDashboard onUploadSuccess={handleUploadSuccess} />
-        )}
-        {currentView === 'analysis' && taskId && (
-          <AnalysisDashboard taskId={taskId} onReset={handleReset} />
-        )}
-        {currentView === 'history' && (
-          <TaskHistory onSelectTask={handleSelectTask} />
-        )}
-        {currentView === 'security' && (
-          <Security />
-        )}
+        {currentView === 'upload' && <UploadDashboard onUploadSuccess={handleUploadSuccess} />}
+        {currentView === 'analysis' && taskId && <AnalysisDashboard taskId={taskId} onReset={handleReset} />}
+        {currentView === 'history' && <TaskHistory onSelectTask={handleSelectTask} />}
+        {currentView === 'security' && <Security />}
       </div>
     </div>
   );
