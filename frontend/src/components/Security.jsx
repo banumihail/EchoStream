@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { authFetch } from '../lib/auth';
 import { startRegistration } from '@simplewebauthn/browser';
+import Icon from './Icon';
 
 const Security = () => {
   const [me, setMe] = useState(null);
@@ -368,18 +369,18 @@ const Security = () => {
 
       {error && (
         <div className="error-banner" style={{ marginBottom: 16 }}>
-          <span className="error-icon">⚠️</span>
+          <span className="error-icon"><Icon name="alert" size={16} /></span>
           <p>{error}</p>
         </div>
       )}
       {info && (
-        <div className="glass-panel" style={{ padding: 14, marginBottom: 16, borderLeft: '3px solid var(--success)' }}>
+        <div className="slate" style={{ padding: 14, marginBottom: 16, borderLeft: '3px solid var(--success)' }}>
           <p style={{ margin: 0, color: 'var(--success)' }}>{info}</p>
         </div>
       )}
 
       {/* TOTP card */}
-      <div className="glass-panel" style={{ padding: 22, marginBottom: 16 }}>
+      <div className="slate" style={{ padding: 22, marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
           <div>
             <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Authenticator app (TOTP)</h3>
@@ -456,7 +457,7 @@ const Security = () => {
       </div>
 
       {/* Backup codes card */}
-      <div className="glass-panel" style={{ padding: 22, marginBottom: 16 }}>
+      <div className="slate" style={{ padding: 22, marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
           <div>
             <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Backup codes</h3>
@@ -522,7 +523,7 @@ const Security = () => {
       </div>
 
       {/* Email OTP card */}
-      <div className="glass-panel" style={{ padding: 22, marginBottom: 16 }}>
+      <div className="slate" style={{ padding: 22, marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
           <div>
             <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Email OTP</h3>
@@ -600,7 +601,7 @@ const Security = () => {
       </div>
 
       {/* FIDO2 / WebAuthn card */}
-      <div className="glass-panel" style={{ padding: 22, marginBottom: 16 }}>
+      <div className="slate" style={{ padding: 22, marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
           <div>
             <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Security keys (FIDO2 / WebAuthn)</h3>
@@ -662,7 +663,7 @@ const Security = () => {
       </div>
 
       {/* Push notification (Telegram) card */}
-      <div className="glass-panel" style={{ padding: 22, marginBottom: 16 }}>
+      <div className="slate" style={{ padding: 22, marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
           <div>
             <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Push approval (Telegram)</h3>
