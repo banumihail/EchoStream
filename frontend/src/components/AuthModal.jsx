@@ -230,7 +230,7 @@ const AuthModal = ({ initialMode = 'login', onClose, onLoggedIn }) => {
         <div className="modal-card">
           <button className="modal-close" onClick={onClose} aria-label="Close"><Icon name="close" size={18} /></button>
           <div style={{ textAlign: 'center', marginBottom: 24 }}>
-            <h1 className="modal-title">Echo<em>Stream</em></h1>
+            <h1 className="modal-title">Echo<em>Stream</em><span className="lm-cursor" /></h1>
             <p className="modal-subtitle">Two-factor authentication</p>
           </div>
           <form onSubmit={submitMfa}>
@@ -344,7 +344,7 @@ const AuthModal = ({ initialMode = 'login', onClose, onLoggedIn }) => {
             ) : null}
 
             {error && (
-              <div className="error-banner" style={{ marginTop: 14 }}>
+              <div className="error-banner shake" style={{ marginTop: 14 }}>
                 <span className="error-icon"><Icon name="alert" size={16} /></span>
                 <p>{error}</p>
               </div>
@@ -440,7 +440,7 @@ const AuthModal = ({ initialMode = 'login', onClose, onLoggedIn }) => {
           )}
 
           {error && (
-            <div className="error-banner" style={{ marginTop: 14 }}>
+            <div className="error-banner shake" style={{ marginTop: 14 }}>
               <span className="error-icon"><Icon name="alert" size={16} /></span>
               <p>{error}</p>
             </div>

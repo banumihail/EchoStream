@@ -1,5 +1,6 @@
 import React from 'react';
 import Icon from './Icon';
+import CasePreview from './CasePreview';
 
 const TILES = [
   { icon: 'transcript', title: 'Word-level transcript', body: 'Clickable, searchable, time-synced to the video.' },
@@ -8,11 +9,30 @@ const TILES = [
   { icon: 'pii', title: 'PII detection', body: "Names, places, orgs flagged the moment they're spoken." },
 ];
 
+// Equalizer bars for the ambient layer — count is decorative.
+const EQ_BARS = Array.from({ length: 26 });
+
 export default function LandingPage({ onSignIn, onGetStarted }) {
   return (
     <div className="landing fade-in">
+      <div className="landing-ambient" aria-hidden="true">
+        <div className="landing-ambient-glow" />
+        <div className="landing-ambient-scan" />
+        <div className="landing-eq">
+          {EQ_BARS.map((_, i) => (
+            <span
+              key={i}
+              style={{
+                animationDelay: `${(i % 7) * 0.12 + (i % 3) * 0.05}s`,
+                animationDuration: `${1.1 + (i % 5) * 0.18}s`,
+              }}
+            />
+          ))}
+        </div>
+      </div>
+
       <nav className="landing-nav">
-        <span className="wordmark">EchoStream</span>
+        <span className="wordmark">Echo<em>Stream</em></span>
         <div className="landing-nav-actions">
           <button className="btn btn-ghost" onClick={onSignIn}>Sign in</button>
           <button className="btn btn-primary" onClick={onGetStarted}>Get started</button>
@@ -20,12 +40,19 @@ export default function LandingPage({ onSignIn, onGetStarted }) {
       </nav>
 
       <header className="landing-hero">
-        <div className="landing-eyebrow">Upload · Detect · Redact</div>
-        <h1 className="landing-title">Privacy redaction, done by the pipeline — not by hand.</h1>
-        <p className="landing-sub">
-          Five models analyse every clip in parallel, then an active-censorship stage physically
-          blurs faces and mutes sensitive audio.
-        </p>
+        <div className="landing-hero-text">
+          <div className="landing-eyebrow lm-r lm-d1">
+            Upload · Detect · Redact<span className="lm-cursor" />
+          </div>
+          <h1 className="landing-title lm-r lm-d2">Privacy redaction, done by the pipeline — not by hand.</h1>
+          <p className="landing-sub lm-r lm-d3">
+            Five models analyse every clip in parallel, then an active-censorship stage physically
+            blurs faces and mutes sensitive audio.
+          </p>
+        </div>
+        <div className="landing-hero-visual lm-r lm-d4">
+          <CasePreview />
+        </div>
       </header>
 
       <section className="landing-tiles">
