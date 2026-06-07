@@ -1,6 +1,5 @@
 import React from 'react';
 import Icon from './Icon';
-import TranscriptScan from './TranscriptScan';
 
 const TILES = [
   { icon: 'transcript', title: 'Word-level transcript', body: 'Clickable, searchable, time-synced to the video.' },
@@ -49,9 +48,6 @@ export default function LandingPage({ onSignIn, onGetStarted }) {
             Five models analyse every clip in parallel, then an active-censorship stage physically
             blurs faces and mutes sensitive audio.
           </p>
-        </div>
-        <div className="landing-hero-visual lm-r lm-d4">
-          <TranscriptScan />
         </div>
       </header>
 
