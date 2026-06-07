@@ -30,11 +30,16 @@ export default function LandingPage({ onSignIn, onGetStarted }) {
         </div>
       </div>
 
-      <nav className="landing-nav">
-        <span className="wordmark">Echo<em>Stream</em></span>
-        <div className="landing-nav-actions">
-          <button className="btn btn-ghost" onClick={onSignIn}>Sign in</button>
-          <button className="btn btn-primary" onClick={onGetStarted}>Get started</button>
+      <nav className="masthead landing-masthead">
+        <div className="masthead-inner">
+          <div className="masthead-brand">
+            <span className="wordmark">Echo<em>Stream</em></span>
+            <span className="stamp">Forensic / v0.1</span>
+          </div>
+          <div className="landing-nav-actions">
+            <button className="btn btn-ghost" onClick={onSignIn}>Sign in</button>
+            <button className="btn btn-primary" onClick={onGetStarted}>Get started</button>
+          </div>
         </div>
       </nav>
 
