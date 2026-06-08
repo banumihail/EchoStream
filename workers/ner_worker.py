@@ -40,7 +40,7 @@ class NERWorker(BaseWorker):
         self.ner_pipeline = pipeline(
             "ner",
             model="dslim/bert-base-NER",  # Pre-trained BERT for NER
-            aggregation_strategy="simple",  # Group tokens into entities
+            aggregation_strategy="average",  # word-level grouping; avoids WordPiece (##) fragments on rare names
             device=self.device
         )
 
