@@ -19,6 +19,7 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
   const [censorAudio, setCensorAudio] = useState(true);
   const [blurObjects, setBlurObjects] = useState(['person']);
   const [videoMode, setVideoMode] = useState('blur');
+  const [blurStrength, setBlurStrength] = useState(5);
   const [audioMode, setAudioMode] = useState('beep');
   const [faceMode, setFaceMode] = useState('selected');
   const [references, setReferences] = useState([]);
@@ -63,6 +64,7 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
       fd.append('censor_audio', String(censorAudio));
       fd.append('blur_objects', blurObjects.join(','));
       fd.append('video_mode', videoMode);
+      fd.append('blur_strength', String(blurStrength));
       fd.append('audio_mode', audioMode);
       fd.append('face_mode', faceMode);
       fd.append('reference_names', references.map(r => r.name || '').join(','));
@@ -253,6 +255,23 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
                     <option value="pixelate">Mosaic / pixelate</option>
                     <option value="box">Solid black box</option>
                   </select>
+                  {(videoMode === 'blur' || videoMode === 'pixelate') && (
+                    <div style={{ marginTop: 14 }}>
+                      <span className="field-label">Strength</span>
+                      <input
+                        type="range"
+                        min={1}
+                        max={10}
+                        step={1}
+                        value={blurStrength}
+                        onChange={(e) => setBlurStrength(Number(e.target.value))}
+                        style={{ width: '100%', accentColor: 'var(--acid)' }}
+                      />
+                      <div className="smallcaps" style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--bone-dim)' }}>
+                        <span>Light</span><span>Strong</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
