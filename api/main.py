@@ -288,7 +288,8 @@ def auth_login(payload: LoginRequest, request: Request):
                        "event_type": "login_success", "mfa_method": "password",
                        "outcome": "ok"})
 
-    methods = user.get("mfa_methods") or []
+    # Only TOTP is supported; ignore any legacy enrolled methods on the user doc.
+    methods = [m for m in (user.get("mfa_methods") or []) if m == "totp"]
     if methods:
         # Two-step login — issue a short-lived challenge token. Caller must hit
         # /auth/mfa/{method}/verify with it to obtain a real session JWT.
@@ -315,7 +316,6 @@ def auth_me(user=Depends(require_user)):
         "mfa_passed": user.get("mfa", False),
         "mfa_methods": u.get("mfa_methods", []),
         "email": u.get("email"),
-        "backup_codes_remaining": len(u.get("backup_codes_hashed") or []),
     }
 
 
