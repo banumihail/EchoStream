@@ -23,7 +23,6 @@ from shared.auth import (
     hash_password, verify_password,
     create_access_token, create_mfa_challenge_token,
     require_user, require_mfa_challenge,
-    generate_backup_codes, hash_backup_code, consume_backup_code,
 )
 from pydantic import BaseModel
 from fastapi import Request
@@ -426,86 +425,6 @@ def totp_disable(user=Depends(require_user)):
     es.update_user(username, {"mfa_methods": methods, "totp_secret": None})
     es.log_auth_event({"username": username, "event_type": "mfa_disabled",
                        "mfa_method": "totp", "outcome": "ok"})
-    return {"ok": True, "mfa_methods": methods}
-
-
-# ─────────────────────────────────────────────────────────────────
-# MFA — Backup codes
-# ─────────────────────────────────────────────────────────────────
-class BackupVerifyRequest(BaseModel):
-    code: str
-
-
-@app.post("/auth/mfa/backup/generate")
-def backup_generate(request: Request, user=Depends(require_user)):
-    """(Re)generate a fresh set of 10 backup codes. Plaintext codes are
-    returned ONCE and never persisted server-side — only their HMAC-SHA256
-    hashes are stored. Calling this twice invalidates the previous set.
-
-    Generating requires that the session has already passed an MFA challenge
-    — backup codes are an account-recovery factor, not a way to escalate
-    from a single-factor session."""
-    if not user.get("mfa"):
-        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to manage backup codes.")
-    es = get_es_client()
-    username = user["sub"]
-    u = es.get_user(username) or {}
-    codes = generate_backup_codes()
-    hashed = [hash_backup_code(c) for c in codes]
-    methods = list(u.get("mfa_methods") or [])
-    if "backup" not in methods:
-        methods.append("backup")
-    es.update_user(username, {"backup_codes_hashed": hashed, "mfa_methods": methods})
-    es.log_auth_event({"username": username, "ip": _client_ip(request),
-                       "event_type": "mfa_enrolled", "mfa_method": "backup",
-                       "outcome": "ok", "reason": f"{len(codes)} codes generated"})
-    return {"codes": codes, "remaining": len(codes), "mfa_methods": methods}
-
-
-@app.post("/auth/mfa/backup/verify")
-def backup_verify(payload: BackupVerifyRequest, request: Request,
-                  challenge=Depends(require_mfa_challenge)):
-    """Complete the two-step login with a backup code. The matching hash is
-    removed on success (single-use). If the consumed code was the last one,
-    'backup' is automatically removed from mfa_methods."""
-    es = get_es_client()
-    username = challenge["sub"]
-    ip = _client_ip(request)
-    u = es.get_user(username) or {}
-    hashed = list(u.get("backup_codes_hashed") or [])
-    if not hashed or "backup" not in (u.get("mfa_methods") or []):
-        raise HTTPException(status_code=400, detail="Backup codes are not enrolled for this user.")
-    ok, remaining = consume_backup_code(payload.code, hashed)
-    if not ok:
-        es.log_auth_event({"username": username, "ip": ip,
-                           "event_type": "mfa_fail", "mfa_method": "backup",
-                           "outcome": "denied", "reason": "bad code"})
-        raise HTTPException(status_code=401, detail="Invalid backup code.")
-    update = {"backup_codes_hashed": remaining}
-    if not remaining:
-        methods = [m for m in (u.get("mfa_methods") or []) if m != "backup"]
-        update["mfa_methods"] = methods
-    es.update_user(username, update)
-    es.log_auth_event({"username": username, "ip": ip,
-                       "event_type": "mfa_success", "mfa_method": "backup",
-                       "outcome": "ok", "reason": f"{len(remaining)} codes remaining"})
-    token = create_access_token({"sub": username, "mfa": True})
-    return {"access_token": token, "token_type": "bearer", "username": username,
-            "remaining": len(remaining)}
-
-
-@app.post("/auth/mfa/backup/disable")
-def backup_disable(user=Depends(require_user)):
-    """Invalidate all backup codes and remove 'backup' from mfa_methods."""
-    if not user.get("mfa"):
-        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to disable it.")
-    es = get_es_client()
-    username = user["sub"]
-    u = es.get_user(username) or {}
-    methods = [m for m in (u.get("mfa_methods") or []) if m != "backup"]
-    es.update_user(username, {"backup_codes_hashed": [], "mfa_methods": methods})
-    es.log_auth_event({"username": username, "event_type": "mfa_disabled",
-                       "mfa_method": "backup", "outcome": "ok"})
     return {"ok": True, "mfa_methods": methods}
 
 

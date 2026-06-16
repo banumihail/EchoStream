@@ -120,47 +120,6 @@ async def require_user(authorization: str | None = Header(default=None)) -> dict
     return payload
 
 
-# ─────────────────────────────────────────────────────────────────
-# Backup codes (Phase 2 MFA)
-# ─────────────────────────────────────────────────────────────────
-# Unambiguous alphabet: no 0/O, no 1/I/L, no Z (looks like 2)
-_BACKUP_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXY23456789"
-BACKUP_CODE_KEY = os.getenv("BACKUP_CODE_KEY", JWT_SECRET + ":backup").encode()
-BACKUP_CODE_COUNT = 10
-
-
-def generate_backup_codes(n: int = BACKUP_CODE_COUNT) -> list[str]:
-    """Return n unique codes in 'XXXX-XXXX' format. Plaintext — show to the
-    user ONCE then discard from server memory."""
-    codes = set()
-    while len(codes) < n:
-        a = "".join(secrets.choice(_BACKUP_ALPHABET) for _ in range(4))
-        b = "".join(secrets.choice(_BACKUP_ALPHABET) for _ in range(4))
-        codes.add(f"{a}-{b}")
-    return list(codes)
-
-
-def hash_backup_code(code: str) -> str:
-    """HMAC-SHA256 of the normalized code. Server-side key means a DB leak
-    can't be brute-forced offline without also leaking BACKUP_CODE_KEY."""
-    normalized = code.replace(" ", "").upper()
-    return hmac.new(BACKUP_CODE_KEY, normalized.encode(), hashlib.sha256).hexdigest()
-
-
-def consume_backup_code(code: str, hashed_list: list[str]) -> tuple[bool, list[str]]:
-    """Return (ok, new_hashed_list). If code is valid, its hash is removed
-    from the list (single-use). Constant-time compare against each entry."""
-    target = hash_backup_code(code)
-    new_list = []
-    matched = False
-    for h in hashed_list:
-        if not matched and hmac.compare_digest(h, target):
-            matched = True
-            continue
-        new_list.append(h)
-    return matched, new_list
-
-
 async def require_mfa_challenge(authorization: str | None = Header(default=None)) -> dict:
     """FastAPI dependency for endpoints that complete an MFA challenge.
     Accepts ONLY challenge-purpose tokens."""
