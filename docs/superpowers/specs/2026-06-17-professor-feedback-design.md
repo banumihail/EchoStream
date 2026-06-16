@@ -21,8 +21,9 @@ Reduce the multi-factor system to a single method — **Google Authenticator (TO
 
 ### Shared + workers
 - [shared/auth.py](../../../shared/auth.py): remove the backup-code helpers (`generate_backup_codes`, `hash_backup_code`, `consume_backup_code`) and any email/FIDO2/push helpers. Keep the TOTP helpers (`pyotp`-based).
-- Delete `shared/telegram_push.py` (push transport) and any WebAuthn server helpers.
-- Delete the `workers/telegram_poller.py` worker (only the push flow used it); remove it from the boot/run scripts.
+- Delete `shared/fido2.py` (WebAuthn) and `shared/email_otp.py` (email-OTP) — both are MFA-only.
+- **Keep `shared/telegram_push.py`** — it's also imported by `workers/security_alerter.py` (a separate alerting feature, not MFA); only stop using it for MFA.
+- Delete the `workers/telegram_poller.py` worker (only the push MFA flow used it).
 
 ### Frontend
 - [AuthModal.jsx](../../../frontend/src/components/AuthModal.jsx): the `step === 'mfa'` branch becomes **TOTP-only** — drop the method `<select>` and the `push` / `fido2` / `email` / `backup` conditional blocks; render only the 6-digit code input + Verify. All non-TOTP handlers (`startPushApproval`, `verifyWithFido2`, `requestEmailOtp`, email/push state) are removed.
