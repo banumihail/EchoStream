@@ -480,6 +480,7 @@ async def censor_video(
     blur_objects: str = Form("person"),    # comma-separated to keep multipart simple
     video_mode: str = Form("blur"),
     audio_mode: str = Form("beep"),
+    blur_strength: int = Form(5),          # 1-10 blur/pixelate intensity
     face_mode: str = Form("selected"),     # 'selected' | 'others'
     reference_names: str = Form(""),       # comma-separated, aligned with reference_faces
     reference_faces: list[UploadFile] = File(default=[]),
@@ -528,6 +529,7 @@ async def censor_video(
         "blur_objects": [s.strip() for s in blur_objects.split(",") if s.strip()],
         "video_mode": video_mode,
         "audio_mode": audio_mode,
+        "blur_strength": max(1, min(10, blur_strength)),
         "face_mode": face_mode,
         "face_references": face_refs,
     }
