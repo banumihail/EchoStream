@@ -31,7 +31,6 @@ from shared.email_otp import (
     OTP_RESEND_SECONDS,
 )
 from shared import fido2 as fido2_lib
-from shared import telegram_push as tg
 from pydantic import BaseModel
 from fastapi import Request
 
@@ -830,118 +829,6 @@ def email_mfa_disable(user=Depends(require_user)):
 # MFA — Push notification (Telegram bot, Approve/Deny)
 # ─────────────────────────────────────────────────────────────────
 PUSH_REQUEST_TTL_SECONDS = 120
-
-
-@app.post("/auth/mfa/push/enroll/begin")
-def push_enroll_begin(user=Depends(require_user)):
-    """Generate a one-time pairing token and return a deep link to the bot.
-    The user opens it in Telegram and taps Start; the poller links their
-    chat_id. Requires an MFA-passed session."""
-    if not user.get("mfa"):
-        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to connect push.")
-    if not tg.is_configured():
-        raise HTTPException(status_code=503, detail="Push is not configured on the server (TELEGRAM_BOT_TOKEN missing).")
-    es = get_es_client()
-    username = user["sub"]
-    pairing_token = uuid.uuid4().hex
-    es.update_user(username, {"telegram_pairing_token": pairing_token})
-    try:
-        bot = tg.get_me()
-        bot_username = bot.get("username")
-    except Exception:
-        raise HTTPException(status_code=502, detail="Could not reach Telegram.")
-    deep_link = f"https://t.me/{bot_username}?start={pairing_token}"
-    return {"deep_link": deep_link, "bot_username": bot_username}
-
-
-@app.get("/auth/mfa/push/enroll/status")
-def push_enroll_status(user=Depends(require_user)):
-    """Polled by the Security page; reports whether pairing has completed."""
-    es = get_es_client()
-    u = es.get_user(user["sub"]) or {}
-    enrolled = "push" in (u.get("mfa_methods") or []) and bool(u.get("telegram_chat_id"))
-    return {"enrolled": enrolled}
-
-
-@app.post("/auth/mfa/push/request")
-def push_request(request: Request, challenge=Depends(require_mfa_challenge)):
-    """Login-flow: create a pending request and send the Approve/Deny prompt
-    to the user's Telegram."""
-    es = get_es_client()
-    username = challenge["sub"]
-    u = es.get_user(username) or {}
-    chat_id = u.get("telegram_chat_id")
-    if "push" not in (u.get("mfa_methods") or []) or not chat_id:
-        raise HTTPException(status_code=400, detail="Push is not enrolled for this user.")
-    request_id = uuid.uuid4().hex[:12]
-    expires = (datetime.now(timezone.utc) + timedelta(seconds=PUSH_REQUEST_TTL_SECONDS)).isoformat()
-    es.update_user(username, {"pending_push": {
-        "request_id": request_id, "status": "pending", "expires": expires,
-        "created": datetime.now(timezone.utc).isoformat(),
-    }})
-    ip = _client_ip(request)
-    text = (f"EchoStream sign-in request\n\nUser: {username}\nIP: {ip}\n\n"
-            f"Approve only if this is you. Expires in {PUSH_REQUEST_TTL_SECONDS // 60} min.")
-    try:
-        tg.send_approval_request(chat_id, text, request_id, username)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Could not send push: {e}")
-    es.log_auth_event({"username": username, "ip": ip, "event_type": "push_sent",
-                       "mfa_method": "push", "outcome": "ok"})
-    return {"ok": True, "request_id": request_id, "expires_in": PUSH_REQUEST_TTL_SECONDS}
-
-
-@app.get("/auth/mfa/push/status")
-def push_status(challenge=Depends(require_mfa_challenge)):
-    """Polled by the login screen. Returns pending | approved | denied | expired | none."""
-    es = get_es_client()
-    u = es.get_user(challenge["sub"]) or {}
-    pending = u.get("pending_push") or {}
-    status = pending.get("status", "none")
-    # Lazily mark expiry so the UI doesn't hang on a never-answered request.
-    if status == "pending":
-        try:
-            if datetime.now(timezone.utc) > datetime.fromisoformat(pending["expires"]):
-                status = "expired"
-        except (KeyError, ValueError):
-            pass
-    return {"status": status}
-
-
-@app.post("/auth/mfa/push/verify")
-def push_verify(request: Request, challenge=Depends(require_mfa_challenge)):
-    """Issue a session JWT iff the pending request was approved. Clears the
-    pending request so it can't be replayed."""
-    es = get_es_client()
-    username = challenge["sub"]
-    u = es.get_user(username) or {}
-    pending = u.get("pending_push") or {}
-    if pending.get("status") != "approved":
-        raise HTTPException(status_code=401, detail="Push not approved.")
-    # Single-use: clear the pending request.
-    es.update_user(username, {"pending_push": None})
-    es.log_auth_event({"username": username, "ip": _client_ip(request),
-                       "event_type": "mfa_success", "mfa_method": "push", "outcome": "ok"})
-    token = create_access_token({"sub": username, "mfa": True})
-    return {"access_token": token, "token_type": "bearer", "username": username}
-
-
-@app.post("/auth/mfa/push/disable")
-def push_disable(user=Depends(require_user)):
-    """Unlink Telegram and remove 'push' from mfa_methods."""
-    if not user.get("mfa"):
-        raise HTTPException(status_code=403, detail="Re-authenticate with MFA to disable it.")
-    es = get_es_client()
-    username = user["sub"]
-    u = es.get_user(username) or {}
-    methods = [m for m in (u.get("mfa_methods") or []) if m != "push"]
-    es.update_user(username, {
-        "mfa_methods": methods,
-        "telegram_chat_id": None, "telegram_pairing_token": None, "pending_push": None,
-    })
-    es.log_auth_event({"username": username, "event_type": "mfa_disabled",
-                       "mfa_method": "push", "outcome": "ok"})
-    return {"ok": True, "mfa_methods": methods}
 
 
 @app.get("/")
