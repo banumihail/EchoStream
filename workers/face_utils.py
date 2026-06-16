@@ -7,6 +7,7 @@ so no extra Python dependencies are needed beyond opencv-python.
 import os
 import cv2
 import numpy as np
+from blur_strength import pixelate_factor, opencv_blur_kernel
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MODELS_DIR = os.path.join(_PROJECT_ROOT, "models_cache", "face")
@@ -63,7 +64,7 @@ class FaceEngine:
         return self.embed(img, largest)
 
 
-def apply_region_effect(frame, x, y, w, h, mode):
+def apply_region_effect(frame, x, y, w, h, mode, strength=5):
     """Mutate `frame` in place by applying mode ∈ {'blur','pixelate','box'} to the region."""
     H, W = frame.shape[:2]
     x = max(0, int(x)); y = max(0, int(y))
@@ -72,12 +73,13 @@ def apply_region_effect(frame, x, y, w, h, mode):
         return
     region = frame[y:y + h, x:x + w]
     if mode == "pixelate":
-        sw = max(1, w // 12); sh = max(1, h // 12)
+        f = pixelate_factor(strength)
+        sw = max(1, w // f); sh = max(1, h // f)
         small = cv2.resize(region, (sw, sh), interpolation=cv2.INTER_AREA)
         frame[y:y + h, x:x + w] = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
     elif mode == "box":
         frame[y:y + h, x:x + w] = 0
     else:  # blur (default)
-        # Kernel ~odd, scaled to face size so blur strength tracks subject scale
-        k = max(15, (min(w, h) // 4) | 1)
+        # Kernel scaled to face size AND the chosen strength (odd).
+        k = opencv_blur_kernel(w, h, strength)
         frame[y:y + h, x:x + w] = cv2.GaussianBlur(region, (k, k), 0)

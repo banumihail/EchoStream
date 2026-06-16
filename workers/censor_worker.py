@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from base_worker import BaseWorker
 import face_utils
+from blur_strength import gblur_sigma, pixelate_factor, clamp_strength
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.elasticsearch_client import ElasticsearchClient
@@ -89,7 +90,7 @@ class CensorWorker(BaseWorker):
         # Default: silence
         return f"[{source}]volume=0:enable='{enable_x}'[a]", "a"
 
-    def _build_video_filter(self, regions, video_mode):
+    def _build_video_filter(self, regions, video_mode, blur_strength=5):
         """filter_complex segment for video. Returns (graph_text, output_label) or (None, None)."""
         if not regions:
             return None, None
@@ -104,9 +105,10 @@ class CensorWorker(BaseWorker):
 
         # blur / pixelate: per region, crop a copy, apply effect, overlay back with time gating.
         if video_mode == "pixelate":
-            effect = "scale=iw/12:ih/12:flags=area,scale=iw*12:ih*12:flags=neighbor"
+            f = pixelate_factor(blur_strength)
+            effect = f"scale=iw/{f}:ih/{f}:flags=area,scale=iw*{f}:ih*{f}:flags=neighbor"
         else:
-            effect = "gblur=sigma=15"  # blur (broadcast-style)
+            effect = f"gblur=sigma={gblur_sigma(blur_strength)}"  # blur (broadcast-style)
 
         n = len(regions)
         parts = []
@@ -128,7 +130,7 @@ class CensorWorker(BaseWorker):
         return ";".join(parts), "v"
 
     def render_face_blur(self, input_path, output_path, identities, face_mode,
-                         mute_intervals, video_mode, audio_mode):
+                         mute_intervals, video_mode, audio_mode, blur_strength=5):
         """OpenCV per-frame face-tracking blur supporting multiple reference
         identities and two modes:
           - face_mode='selected': blur faces matching ANY identity (blacklist)
@@ -194,7 +196,7 @@ class CensorWorker(BaseWorker):
 
                 if should_blur:
                     face_utils.apply_region_effect(
-                        frame, face[0], face[1], face[2], face[3], video_mode
+                        frame, face[0], face[1], face[2], face[3], video_mode, blur_strength
                     )
                     if best_name is not None:
                         ident_seen_this_frame.add(best_name)
@@ -256,7 +258,7 @@ class CensorWorker(BaseWorker):
             raise RuntimeError(f"FFmpeg mux failed: {result.stderr[-500:]}")
 
     def build_ffmpeg_command(self, input_path, output_path, mute_intervals, video_blurs,
-                             video_mode="blur", audio_mode="beep"):
+                             video_mode="blur", audio_mode="beep", blur_strength=5):
         regions = []
         for blur in video_blurs:
             x = max(0, int(blur["box"]["xmin"]))
@@ -275,7 +277,7 @@ class CensorWorker(BaseWorker):
             })
 
         cmd = ["ffmpeg", "-y", "-i", input_path]
-        v_part, v_out = self._build_video_filter(regions, video_mode)
+        v_part, v_out = self._build_video_filter(regions, video_mode, blur_strength)
         a_part, a_out = self._build_audio_filter(mute_intervals, audio_mode)
 
         if v_part and a_part:
@@ -303,6 +305,7 @@ class CensorWorker(BaseWorker):
         censor_audio = task_data.get("censor_audio", False)
         video_mode = task_data.get("video_mode", "blur")
         audio_mode = task_data.get("audio_mode", "beep")
+        blur_strength = clamp_strength(task_data.get("blur_strength", 5))
         # New shape: a list of {path, name} dicts. Old shape (single path) still
         # accepted for backwards compatibility.
         face_references = task_data.get("face_references") or []
@@ -352,7 +355,7 @@ class CensorWorker(BaseWorker):
             print(f"  [2/3] Face-tracking blur — mode={face_mode}, identities={len(identities)}")
             stats = self.render_face_blur(
                 input_path, output_path, identities, face_mode,
-                mute_intervals, video_mode, audio_mode,
+                mute_intervals, video_mode, audio_mode, blur_strength,
             )
             print(f"  [3/3] Finalizing state...")
             rel_output = output_path.replace(project_root + os.sep, "").replace("\\", "/")
@@ -373,9 +376,9 @@ class CensorWorker(BaseWorker):
         print(f"  [2/3] Executing FFmpeg rendering pipeline...")
         cmd = self.build_ffmpeg_command(
             input_path, output_path, mute_intervals, video_blurs,
-            video_mode=video_mode, audio_mode=audio_mode,
+            video_mode=video_mode, audio_mode=audio_mode, blur_strength=blur_strength,
         )
-        print(f"  Modes: video={video_mode}, audio={audio_mode}")
+        print(f"  Modes: video={video_mode}, audio={audio_mode}, strength={blur_strength}")
         print(f"  FFmpeg command: {cmd}")
         if "-c" in cmd and "copy" in cmd:
             result = subprocess.run(["ffmpeg", "-y", "-i", input_path, "-c", "copy", output_path], capture_output=True, text=True)
