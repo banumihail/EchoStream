@@ -102,12 +102,8 @@ const InteractiveTranscript = ({ chunks, videoRef, fallbackText }) => {
           break;
         }
       }
-      setActiveIndex(prev => {
-        if (prev !== foundRow && foundRow >= 0 && phraseRefs.current[foundRow]) {
-          phraseRefs.current[foundRow].scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-        return foundRow;
-      });
+      // Highlight the current line, but do NOT auto-scroll the page to follow it.
+      setActiveIndex(foundRow);
       setActiveWord(foundWord);
     };
 
