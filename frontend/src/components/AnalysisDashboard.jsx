@@ -25,6 +25,9 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
   const [references, setReferences] = useState([]);
 
   const originalVideoRef = useRef(null);
+  // Apply the default blur selection only ONCE, when vision results first
+  // arrive -- so the recurring poll can never reset the user's choices.
+  const defaultsApplied = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -38,16 +41,16 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
           setError(null);
           if (data.status === 'censored') setIsCensoring(false);
 
-          if (data.vision_analysis && data.vision_analysis.summary && blurObjects.length === 1 && blurObjects[0] === 'person') {
-            const detectedLabels = data.vision_analysis.summary.map(s => s.label);
-            if (detectedLabels.includes('person')) {
-              setBlurObjects(['person']);
-            } else if (detectedLabels.length > 0) {
-              setBlurObjects([]);
-            }
+          // One-time default: select "person" if detected, otherwise nothing.
+          // Guarded by a ref (never by reading blurObjects), so it runs exactly
+          // once and can never reset the user's later checkbox choices.
+          if (!defaultsApplied.current && data.vision_analysis?.summary?.length) {
+            defaultsApplied.current = true;
+            const labels = data.vision_analysis.summary.map(s => s.label);
+            setBlurObjects(labels.includes('person') ? ['person'] : []);
           }
         }
-      } catch (err) {
+      } catch {
         if (active) setError('Connection to API lost. Retrying...');
       }
     };
