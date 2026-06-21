@@ -7,6 +7,17 @@ import json
 import sys
 import os
 
+# Workers run head-less on Windows, where stdout defaults to a legacy code page
+# (cp1252) that cannot encode emoji / CJK / math-italic characters common in
+# video titles. Without this, a single print() of an exotic filename raises
+# UnicodeEncodeError and fails the whole task before processing even starts.
+# Force UTF-8 with errors="replace" so logging can never crash a worker.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
