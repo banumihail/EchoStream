@@ -124,6 +124,12 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
   const originalUrl = taskData.file_path ? `${API_URL}/${taskData.file_path}` : null;
   const censoredUrl = hasCensored ? `${API_URL}/${taskData.censored_file_path}` : null;
   const detectedObjects = taskData.vision_analysis?.summary || [];
+  // One strength slider governs BOTH object blur and identity-aware face blur
+  // (the censor worker applies blur_strength to each). Show it whenever a blur
+  // or pixelate effect is actually in play for objects or faces.
+  const faceRedactionActive = references.length > 0 || faceMode === 'others';
+  const blurMethodActive = videoMode === 'blur' || videoMode === 'pixelate';
+  const showStrength = blurMethodActive && (blurObjects.length > 0 || faceRedactionActive);
 
   const dur = formatDuration(taskData.duration_seconds);
 
@@ -258,23 +264,6 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
                     <option value="pixelate">Mosaic / pixelate</option>
                     <option value="box">Solid black box</option>
                   </select>
-                  {(videoMode === 'blur' || videoMode === 'pixelate') && (
-                    <div style={{ marginTop: 14 }}>
-                      <span className="field-label">Strength</span>
-                      <input
-                        type="range"
-                        min={1}
-                        max={10}
-                        step={1}
-                        value={blurStrength}
-                        onChange={(e) => setBlurStrength(Number(e.target.value))}
-                        style={{ width: '100%', accentColor: 'var(--acid)' }}
-                      />
-                      <div className="smallcaps" style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--bone-dim)' }}>
-                        <span>Light</span><span>Strong</span>
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
             </div>
@@ -351,6 +340,32 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
               )}
             </div>
 
+            {showStrength && (
+              <div className="config-card" style={{ marginTop: 16, marginBottom: 0 }}>
+                <div className="config-card-title">
+                  <span className="num">D —</span> Blur strength
+                  <span style={{ marginLeft: 'auto', color: 'var(--bone-faint)', fontWeight: 400, fontSize: 12 }}>
+                    applies to objects + faces
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={1}
+                  max={10}
+                  step={1}
+                  value={blurStrength}
+                  onChange={(e) => setBlurStrength(Number(e.target.value))}
+                  style={{ width: '100%', accentColor: 'var(--acid)' }}
+                />
+                <div className="smallcaps" style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--bone-dim)' }}>
+                  <span>Light</span><span>Strong</span>
+                </div>
+              </div>
+            )}
+
+            <p className="smallcaps" style={{ color: 'var(--bone-dim)', margin: '16px 0 10px', letterSpacing: '0.04em', lineHeight: 1.5 }}>
+              Detection is not perfect — review the redacted output before sharing.
+            </p>
             <div className="config-actions">
               <button className="btn btn-ghost" onClick={() => setShowConfig(false)}>Cancel</button>
               <button className="btn btn-primary" onClick={handleCensor}>
@@ -427,6 +442,10 @@ const AnalysisDashboard = ({ taskId, onReset }) => {
         <h3 className="section-title">Analytical <em>read</em></h3>
         <span className="section-meta">Four parallel pipelines</span>
       </div>
+
+      <p className="smallcaps" style={{ color: 'var(--bone-dim)', marginBottom: 20, letterSpacing: '0.04em', lineHeight: 1.5, maxWidth: 640 }}>
+        Automated analysis — the models can miss or mislabel content and may report things that are not there. Review before acting on these results.
+      </p>
 
       <div className="dashboard-grid">
         {/* Transcript */}
