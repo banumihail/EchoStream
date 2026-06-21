@@ -35,3 +35,10 @@ certs/
 # Visual companion (brainstorming) scratch
 .superpowers/
 .playwright-mcp/
+
+# Thesis — lives in Overleaf, contains personal data (CNP/CI). NEVER push to the public repo.
+docs/thesis-latex/
+# Other local-only docs (separate Word project, demo scripts, report drafts)
+docs/report/
+docs/presentation/
+EchoStream_SecurityProject_source.zip
