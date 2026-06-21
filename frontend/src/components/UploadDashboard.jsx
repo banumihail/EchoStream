@@ -186,7 +186,7 @@ const UploadDashboard = ({ onUploadSuccess }) => {
           <input
             type="text"
             className="text-input"
-            placeholder="https://youtube.com/watch?v=..."
+            placeholder="https://youtube.com/watch?v=… or tiktok.com/@…/video/…"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !uploading) submitUrl(); }}
